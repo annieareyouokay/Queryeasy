@@ -208,11 +208,28 @@ internal sealed class TdsClientToServerPipeline
         var inspectionResult = RpcRequestInspector.Inspect(payload);
 
         Console.WriteLine(
-            $"[{_sessionId}] RPC Request inspected. sp_executesql candidate: {inspectionResult.ContainsSpExecuteSql}.");
+            $"[{_sessionId}] RPC Request inspected. Procedure: {FormatEmpty(inspectionResult.ProcedureName)}, sp_executesql: {inspectionResult.ContainsSpExecuteSql}.");
+
+        if (inspectionResult.ParseWarning is not null)
+        {
+            Console.WriteLine($"[{_sessionId}] RPC parse warning: {inspectionResult.ParseWarning}");
+        }
 
         if (_options.LogSqlText && inspectionResult.ContainsSpExecuteSql)
         {
-            LogSql("RPC Unicode preview", inspectionResult.UnicodePreview);
+            LogSql("RPC sp_executesql stmt", inspectionResult.Statement ?? "<null>");
+
+            if (!string.IsNullOrEmpty(inspectionResult.ParameterDeclaration))
+            {
+                LogSql("RPC sp_executesql params", inspectionResult.ParameterDeclaration);
+            }
+
+            foreach (var parameter in inspectionResult.Parameters.Skip(2))
+            {
+                LogSql(
+                    $"RPC sp_executesql value {FormatEmpty(parameter.Name)} {parameter.TypeName}",
+                    parameter.Value ?? "<null>");
+            }
         }
 
         return originalPackets;
@@ -295,6 +312,11 @@ internal sealed class TdsClientToServerPipeline
         return _options.MaxSqlLogChars > 0 && normalized.Length > _options.MaxSqlLogChars
             ? $"{normalized[.._options.MaxSqlLogChars]}..."
             : normalized;
+    }
+
+    private static string FormatEmpty(string value)
+    {
+        return string.IsNullOrEmpty(value) ? "<empty>" : value;
     }
 
     private static byte[] CombinePayloads(IEnumerable<TdsPacket> packets)
