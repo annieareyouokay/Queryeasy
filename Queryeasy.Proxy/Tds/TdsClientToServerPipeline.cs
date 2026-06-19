@@ -232,7 +232,81 @@ internal sealed class TdsClientToServerPipeline
             }
         }
 
-        return originalPackets;
+        if (_options.Mode is not (ProxyMode.DryRun or ProxyMode.Rewrite)
+            || !inspectionResult.ContainsSpExecuteSql
+            || inspectionResult.SpExecuteSqlRequest is null)
+        {
+            return originalPackets;
+        }
+
+        var rewriteResult = _rewriter.Rewrite(
+            inspectionResult.SpExecuteSqlRequest.Statement,
+            QueryRewriteScope.RpcSpExecuteSql,
+            SpExecuteSqlParameterHelper.GetLogicalParameterNames(
+                inspectionResult.SpExecuteSqlRequest.ParameterDeclaration,
+                inspectionResult.SpExecuteSqlRequest.SqlParameters));
+
+        if (rewriteResult.Error is not null)
+        {
+            Console.WriteLine($"[{_sessionId}] RPC sp_executesql rewrite failed: {rewriteResult.Error}");
+
+            if (_options.RewriteFailureBehavior == RewriteFailureBehavior.FailClosed)
+            {
+                throw new IOException(rewriteResult.Error);
+            }
+
+            return originalPackets;
+        }
+
+        if (!rewriteResult.Changed)
+        {
+            return originalPackets;
+        }
+
+        Console.WriteLine(
+            $"[{_sessionId}] RPC sp_executesql matched rewrite rule(s): {string.Join(", ", rewriteResult.RuleNames)}.");
+
+        if (_options.LogRewriteSqlText)
+        {
+            LogSql("RPC sp_executesql rewritten stmt", rewriteResult.Sql);
+
+            foreach (var parameterChange in rewriteResult.ParameterChanges)
+            {
+                Console.WriteLine(
+                    $"[{_sessionId}] RPC sp_executesql parameter rewrite '{parameterChange.Name}' by rule '{parameterChange.RuleName}'.");
+            }
+        }
+
+        if (_options.Mode == ProxyMode.DryRun)
+        {
+            Console.WriteLine($"[{_sessionId}] DryRun enabled; forwarding original RPC sp_executesql.");
+            return originalPackets;
+        }
+
+        byte[] rewrittenPayload;
+
+        try
+        {
+            rewrittenPayload = RpcSpExecuteSqlEncoder.Encode(
+                inspectionResult.SpExecuteSqlRequest,
+                rewriteResult.Sql,
+                rewriteResult.ParameterChanges);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or OverflowException or FormatException)
+        {
+            var error = $"RPC sp_executesql encode failed: {ex.Message}";
+            Console.WriteLine($"[{_sessionId}] {error}");
+
+            if (_options.RewriteFailureBehavior == RewriteFailureBehavior.FailClosed)
+            {
+                throw new IOException(error, ex);
+            }
+
+            return originalPackets;
+        }
+
+        var maxOriginalPayloadLength = Math.Max(1, originalPackets.Max(packet => packet.Payload.Length));
+        return TdsPacketSplitter.SplitLike(firstPacket, rewrittenPayload, maxOriginalPayloadLength);
     }
 
     private async Task<IReadOnlyList<TdsPacket>> ReadMessagePacketsAsync(
