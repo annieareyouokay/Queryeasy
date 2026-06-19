@@ -1,0 +1,54 @@
+# Build results
+[Bb]in/
+[Oo]bj/
+artifacts/
+
+# User-specific files
+*.user
+*.userosscache
+*.suo
+*.rsuser
+*.sln.docstates
+
+# Visual Studio
+.vs/
+TestResults/
+*.VisualState.xml
+
+# Rider / ReSharper
+.idea/
+_ReSharper*/
+*.DotSettings.user
+
+# VS Code / Cursor local settings
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.cursor/
+
+# .NET
+project.lock.json
+project.fragment.lock.json
+artifacts/
+*.nupkg
+*.snupkg
+
+# Logs and diagnostics
+*.log
+*.tlog
+*.trx
+*.coverage
+*.coveragexml
+coverage/
+
+# Local configuration
+appsettings.Development.json
+appsettings.Local.json
+Queryeasy.Proxy/appsettings.json
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
