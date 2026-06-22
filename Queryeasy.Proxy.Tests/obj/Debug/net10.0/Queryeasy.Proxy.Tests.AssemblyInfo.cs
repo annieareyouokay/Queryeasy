@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Queryeasy.Proxy.Tests")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+0100b0f6e17e74c767072741d8335b602f5ee802")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+a9758cd7ce9b1808f558a49d875dbf079ab0630c")]
 [assembly: System.Reflection.AssemblyProductAttribute("Queryeasy.Proxy.Tests")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Queryeasy.Proxy.Tests")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

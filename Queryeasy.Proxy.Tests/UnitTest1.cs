@@ -141,10 +141,136 @@ public class UnitTest1
             }
         ]);
 
-        var result = rewriter.Rewrite("select @P1", QueryRewriteScope.RpcSpExecuteSql, ["@P1"]);
+        var result = rewriter.Rewrite(
+            "select @P1",
+            QueryRewriteScope.RpcSpExecuteSql,
+            [new RewriteParameterInfo("@P1", "datetime2(3)")]);
 
         Assert.NotNull(result.Error);
         Assert.Contains("requires SqlType", result.Error);
+    }
+
+    [Fact]
+    public void SpExecuteSqlParameterHelper_ParseDeclaredParameters_ReadsMultipleDateTime2Parameters()
+    {
+        var parameters = SpExecuteSqlParameterHelper.ParseDeclaredParameters(
+            "@P1 datetime2(3), @P2 datetime2(3), @P3 int");
+
+        Assert.Equal(3, parameters.Count);
+        Assert.Equal("@P1", parameters[0].Name);
+        Assert.Equal("datetime2(3)", parameters[0].TypeName);
+        Assert.Equal("@P2", parameters[1].Name);
+        Assert.Equal("datetime2(3)", parameters[1].TypeName);
+        Assert.Equal("@P3", parameters[2].Name);
+        Assert.Equal("int", parameters[2].TypeName);
+    }
+
+    [Fact]
+    public void SqlRewriter_MatchesTableAndParameterRegexAndTypeForAllMatchedParameters()
+    {
+        var rewriter = new SqlRewriter(
+        [
+            new SqlRewriteRule
+            {
+                Name = "Reference47_DateTime2Scale3",
+                Scope = QueryRewriteScope.RpcSpExecuteSql,
+                When = new SqlRewriteCondition
+                {
+                    SqlContains = "dbo._Reference47",
+                    ParameterNameRegex = "@P\\d+",
+                    ParameterType = "datetime2(3)"
+                },
+                Actions =
+                [
+                    new SqlRewriteAction
+                    {
+                        Type = SqlRewriteActionType.SetParameterType,
+                        SqlType = "datetime2(0)"
+                    }
+                ]
+            }
+        ]);
+
+        var sql = """
+            SELECT T1._Description
+            FROM dbo._Reference47 T1
+            WHERE T1._Fld58 = @P1 AND T1._Date = @P2
+            """;
+        var parameters = new[]
+        {
+            new RewriteParameterInfo("@P1", "datetime2(3)"),
+            new RewriteParameterInfo("@P2", "datetime2(3)"),
+            new RewriteParameterInfo("@P3", "int")
+        };
+
+        var result = rewriter.Rewrite(sql, QueryRewriteScope.RpcSpExecuteSql, parameters);
+
+        Assert.True(result.Changed);
+        Assert.Equal(2, result.ParameterChanges.Count);
+        Assert.Contains(result.ParameterChanges, change => change.Name == "@P1" && change.SqlType == "datetime2(0)");
+        Assert.Contains(result.ParameterChanges, change => change.Name == "@P2" && change.SqlType == "datetime2(0)");
+    }
+
+    [Fact]
+    public void SqlRewriter_SkipsWhenParameterTypeDoesNotMatch()
+    {
+        var rewriter = CreateReference47DateTime2Rule();
+
+        var result = rewriter.Rewrite(
+            "SELECT 1 FROM dbo._Reference47 T1 WHERE T1._Fld58 = @P1",
+            QueryRewriteScope.RpcSpExecuteSql,
+            [new RewriteParameterInfo("@P1", "datetime2(0)")]);
+
+        Assert.False(result.Changed);
+    }
+
+    [Fact]
+    public void SqlRewriter_SkipsWhenTableDoesNotMatch()
+    {
+        var rewriter = CreateReference47DateTime2Rule();
+
+        var result = rewriter.Rewrite(
+            "SELECT 1 FROM dbo._Reference48 T1 WHERE T1._Fld58 = @P1",
+            QueryRewriteScope.RpcSpExecuteSql,
+            [new RewriteParameterInfo("@P1", "datetime2(3)")]);
+
+        Assert.False(result.Changed);
+    }
+
+    [Fact]
+    public void SqlRewriter_BackwardCompatibleWithParameterExistsAndExplicitActionName()
+    {
+        var rewriter = new SqlRewriter(
+        [
+            new SqlRewriteRule
+            {
+                Name = "ChangeP1",
+                Scope = QueryRewriteScope.RpcSpExecuteSql,
+                When = new SqlRewriteCondition
+                {
+                    ParameterExists = "@P1"
+                },
+                Actions =
+                [
+                    new SqlRewriteAction
+                    {
+                        Type = SqlRewriteActionType.SetParameterType,
+                        Name = "@P1",
+                        SqlType = "datetime2(0)"
+                    }
+                ]
+            }
+        ]);
+
+        var result = rewriter.Rewrite(
+            "select @P1",
+            QueryRewriteScope.RpcSpExecuteSql,
+            [new RewriteParameterInfo("@P1", "datetime2(3)")]);
+
+        Assert.True(result.Changed);
+        Assert.Single(result.ParameterChanges);
+        Assert.Equal("@P1", result.ParameterChanges[0].Name);
+        Assert.Equal("datetime2(0)", result.ParameterChanges[0].SqlType);
     }
 
     [Fact]
@@ -226,6 +352,32 @@ public class UnitTest1
 
         Assert.Contains("datetime2(0)", rewrittenText);
         Assert.True(ContainsSequence(rewritten, [TdsRpcTypeIds.DateTime2, 0x00, 0x06]));
+    }
+
+    private static SqlRewriter CreateReference47DateTime2Rule()
+    {
+        return new SqlRewriter(
+        [
+            new SqlRewriteRule
+            {
+                Name = "Reference47_DateTime2Scale3",
+                Scope = QueryRewriteScope.RpcSpExecuteSql,
+                When = new SqlRewriteCondition
+                {
+                    SqlContains = "dbo._Reference47",
+                    ParameterNameRegex = "@P\\d+",
+                    ParameterType = "datetime2(3)"
+                },
+                Actions =
+                [
+                    new SqlRewriteAction
+                    {
+                        Type = SqlRewriteActionType.SetParameterType,
+                        SqlType = "datetime2(0)"
+                    }
+                ]
+            }
+        ]);
     }
 
     private static RpcParameterInspectionResult CreateParameter(

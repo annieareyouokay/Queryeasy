@@ -272,7 +272,7 @@ internal sealed class TdsClientToServerPipeline
         var rewriteResult = _rewriter.Rewrite(
             inspectionResult.SpExecuteSqlRequest.Statement,
             QueryRewriteScope.RpcSpExecuteSql,
-            SpExecuteSqlParameterHelper.GetLogicalParameterNames(
+            SpExecuteSqlParameterHelper.GetLogicalParameters(
                 inspectionResult.SpExecuteSqlRequest.ParameterDeclaration,
                 inspectionResult.SpExecuteSqlRequest.SqlParameters));
 

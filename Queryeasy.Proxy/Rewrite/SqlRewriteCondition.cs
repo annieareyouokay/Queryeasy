@@ -8,5 +8,9 @@ internal sealed class SqlRewriteCondition
 
     public string? ParameterExists { get; init; }
 
+    public string? ParameterNameRegex { get; init; }
+
+    public string? ParameterType { get; init; }
+
     public bool IgnoreCase { get; init; } = true;
 }

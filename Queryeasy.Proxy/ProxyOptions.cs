@@ -164,6 +164,8 @@ internal sealed record ProxyOptions
                 throw new InvalidOperationException("Rewrite rule name must not be empty.");
             }
 
+            ValidateRewriteCondition(rule);
+
             if (rule.Actions.Count == 0 && string.IsNullOrEmpty(rule.Find))
             {
                 continue;
@@ -173,6 +175,20 @@ internal sealed record ProxyOptions
             {
                 ValidateRewriteAction(rule, action);
             }
+        }
+    }
+
+    private static void ValidateRewriteCondition(SqlRewriteRule rule)
+    {
+        var condition = rule.When;
+        var hasParameterExists = !string.IsNullOrWhiteSpace(condition.ParameterExists);
+        var hasParameterNameRegex = !string.IsNullOrWhiteSpace(condition.ParameterNameRegex);
+        var hasParameterType = !string.IsNullOrWhiteSpace(condition.ParameterType);
+
+        if (hasParameterType && !hasParameterExists && !hasParameterNameRegex)
+        {
+            throw new InvalidOperationException(
+                $"Rule '{rule.Name}' When.ParameterType requires ParameterExists or ParameterNameRegex.");
         }
     }
 
@@ -189,33 +205,51 @@ internal sealed record ProxyOptions
                 break;
 
             case SqlRewriteActionType.SetParameterValue:
-                ValidateParameterActionName(rule, action);
+                ValidateParameterActionTarget(rule, action);
 
                 if (action.Value is null)
                 {
-                    throw new InvalidOperationException($"Rule '{rule.Name}' action SetParameterValue for '{action.Name}' requires Value.");
+                    throw new InvalidOperationException(
+                        $"Rule '{rule.Name}' action SetParameterValue for '{GetParameterActionLabel(action)}' requires Value.");
                 }
 
                 break;
 
             case SqlRewriteActionType.SetParameterType:
-                ValidateParameterActionName(rule, action);
+                ValidateParameterActionTarget(rule, action);
 
                 if (string.IsNullOrWhiteSpace(action.SqlType))
                 {
-                    throw new InvalidOperationException($"Rule '{rule.Name}' action SetParameterType for '{action.Name}' requires SqlType.");
+                    throw new InvalidOperationException(
+                        $"Rule '{rule.Name}' action SetParameterType for '{GetParameterActionLabel(action)}' requires SqlType.");
                 }
 
                 break;
         }
     }
 
-    private static void ValidateParameterActionName(SqlRewriteRule rule, SqlRewriteAction action)
+    private static void ValidateParameterActionTarget(SqlRewriteRule rule, SqlRewriteAction action)
     {
-        if (string.IsNullOrWhiteSpace(action.Name))
+        if (!string.IsNullOrWhiteSpace(action.Name))
         {
-            throw new InvalidOperationException($"Rule '{rule.Name}' action {action.Type} requires Name.");
+            return;
         }
+
+        var condition = rule.When;
+        if (!string.IsNullOrWhiteSpace(condition.ParameterExists)
+            || !string.IsNullOrWhiteSpace(condition.ParameterNameRegex)
+            || !string.IsNullOrWhiteSpace(condition.ParameterType))
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"Rule '{rule.Name}' action {action.Type} requires Name or a parameter filter in When.");
+    }
+
+    private static string GetParameterActionLabel(SqlRewriteAction action)
+    {
+        return string.IsNullOrWhiteSpace(action.Name) ? "matched parameters" : action.Name;
     }
 
     private static void ValidatePort(int port, string name)

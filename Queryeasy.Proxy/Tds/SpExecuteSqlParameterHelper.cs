@@ -13,16 +13,29 @@ internal static class SpExecuteSqlParameterHelper
         string? parameterDeclaration,
         IReadOnlyList<RpcParameterInspectionResult> sqlParameters)
     {
-        var declaredNames = ParseDeclaredParameterNames(parameterDeclaration);
+        return GetLogicalParameters(parameterDeclaration, sqlParameters)
+            .Select(parameter => parameter.Name)
+            .ToArray();
+    }
 
-        if (declaredNames.Count == sqlParameters.Count)
+    public static IReadOnlyList<RewriteParameterInfo> GetLogicalParameters(
+        string? parameterDeclaration,
+        IReadOnlyList<RpcParameterInspectionResult> sqlParameters)
+    {
+        var declaredParameters = ParseDeclaredParameters(parameterDeclaration);
+
+        if (declaredParameters.Count == sqlParameters.Count)
         {
-            return declaredNames;
+            return declaredParameters
+                .Select((entry, index) => new RewriteParameterInfo(
+                    entry.Name,
+                    ResolveTypeName(entry.TypeName, sqlParameters[index].TypeName)))
+                .ToArray();
         }
 
         return sqlParameters
-            .Select(parameter => parameter.Name)
-            .Where(name => !string.IsNullOrEmpty(name))
+            .Where(parameter => !string.IsNullOrEmpty(parameter.Name))
+            .Select(parameter => new RewriteParameterInfo(parameter.Name, parameter.TypeName))
             .ToArray();
     }
 
@@ -56,15 +69,47 @@ internal static class SpExecuteSqlParameterHelper
 
     public static IReadOnlyList<string> ParseDeclaredParameterNames(string? parameterDeclaration)
     {
+        return ParseDeclaredParameters(parameterDeclaration)
+            .Select(parameter => parameter.Name)
+            .ToArray();
+    }
+
+    public static IReadOnlyList<(string Name, string TypeName)> ParseDeclaredParameters(string? parameterDeclaration)
+    {
         if (string.IsNullOrWhiteSpace(parameterDeclaration))
         {
             return [];
         }
 
-        return ParameterNameRegex
-            .Matches(parameterDeclaration)
-            .Select(match => $"@{match.Groups[1].Value}")
-            .ToArray();
+        var matches = ParameterNameRegex.Matches(parameterDeclaration);
+        if (matches.Count == 0)
+        {
+            return [];
+        }
+
+        var results = new List<(string Name, string TypeName)>(matches.Count);
+
+        for (var index = 0; index < matches.Count; index++)
+        {
+            var match = matches[index];
+            var name = $"@{match.Groups[1].Value}";
+            var typeStart = match.Index + match.Length;
+            var typeEnd = index + 1 < matches.Count
+                ? matches[index + 1].Index
+                : parameterDeclaration.Length;
+            var typeName = parameterDeclaration[typeStart..typeEnd].Trim().TrimEnd(',');
+
+            if (!string.IsNullOrWhiteSpace(typeName))
+            {
+                results.Add((name, typeName));
+            }
+        }
+
+        return results;
     }
 
+    private static string ResolveTypeName(string declaredTypeName, string fallbackTypeName)
+    {
+        return string.IsNullOrWhiteSpace(declaredTypeName) ? fallbackTypeName : declaredTypeName;
+    }
 }

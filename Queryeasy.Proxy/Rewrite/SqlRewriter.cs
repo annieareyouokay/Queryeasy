@@ -19,7 +19,7 @@ internal sealed class SqlRewriter
     public RewriteResult Rewrite(
         string sql,
         QueryRewriteScope scope,
-        IReadOnlyCollection<string> parameterNames)
+        IReadOnlyList<RewriteParameterInfo> parameters)
     {
         var rewrittenSql = sql;
         var matchedRules = new List<string>();
@@ -27,7 +27,13 @@ internal sealed class SqlRewriter
 
         foreach (var rule in _rules)
         {
-            if (!IsScopeMatch(rule, scope) || !IsConditionMatch(rule, rewrittenSql, parameterNames))
+            if (!IsScopeMatch(rule, scope))
+            {
+                continue;
+            }
+
+            var conditionMatch = EvaluateCondition(rule, rewrittenSql, parameters);
+            if (!conditionMatch.IsMatch)
             {
                 continue;
             }
@@ -58,10 +64,15 @@ internal sealed class SqlRewriter
                             break;
 
                         case SqlRewriteActionType.SetParameterValue:
-                            if (!string.IsNullOrWhiteSpace(action.Name))
+                            if (action.Value is null)
+                            {
+                                break;
+                            }
+
+                            foreach (var targetName in GetParameterActionTargets(action, conditionMatch.MatchedParameters))
                             {
                                 parameterChanges.Add(new RewriteParameterChange(
-                                    action.Name,
+                                    targetName,
                                     action.Value,
                                     null,
                                     rule.Name));
@@ -71,17 +82,21 @@ internal sealed class SqlRewriter
                             break;
 
                         case SqlRewriteActionType.SetParameterType:
-                            if (!string.IsNullOrWhiteSpace(action.Name))
+                            if (string.IsNullOrWhiteSpace(action.SqlType))
                             {
-                                if (string.IsNullOrWhiteSpace(action.SqlType))
-                                {
-                                    return RewriteResult.Failed(
-                                        sql,
-                                        $"Rule '{rule.Name}' action SetParameterType for '{action.Name}' requires SqlType.");
-                                }
+                                var targetLabel = string.IsNullOrWhiteSpace(action.Name)
+                                    ? "matched parameters"
+                                    : action.Name;
 
+                                return RewriteResult.Failed(
+                                    sql,
+                                    $"Rule '{rule.Name}' action SetParameterType for '{targetLabel}' requires SqlType.");
+                            }
+
+                            foreach (var targetName in GetParameterActionTargets(action, conditionMatch.MatchedParameters))
+                            {
                                 parameterChanges.Add(new RewriteParameterChange(
-                                    action.Name,
+                                    targetName,
                                     null,
                                     action.SqlType,
                                     rule.Name));
@@ -113,10 +128,10 @@ internal sealed class SqlRewriter
         return rule.Scope is QueryRewriteScope.Any || rule.Scope == scope;
     }
 
-    private static bool IsConditionMatch(
+    private static ConditionMatchResult EvaluateCondition(
         SqlRewriteRule rule,
         string sql,
-        IReadOnlyCollection<string> parameterNames)
+        IReadOnlyList<RewriteParameterInfo> parameters)
     {
         var condition = rule.When;
         var comparison = condition.IgnoreCase
@@ -126,7 +141,7 @@ internal sealed class SqlRewriter
         if (!string.IsNullOrEmpty(condition.SqlContains)
             && !sql.Contains(condition.SqlContains, comparison))
         {
-            return false;
+            return ConditionMatchResult.NoMatch;
         }
 
         if (!string.IsNullOrEmpty(condition.SqlRegex))
@@ -140,12 +155,28 @@ internal sealed class SqlRewriter
 
             if (!Regex.IsMatch(sql, condition.SqlRegex, options, TimeSpan.FromSeconds(1)))
             {
-                return false;
+                return ConditionMatchResult.NoMatch;
             }
         }
 
-        return string.IsNullOrEmpty(condition.ParameterExists)
-            || parameterNames.Any(parameterName => IsParameterNameMatch(parameterName, condition.ParameterExists));
+        var hasParameterExists = !string.IsNullOrEmpty(condition.ParameterExists);
+        var hasParameterNameRegex = !string.IsNullOrEmpty(condition.ParameterNameRegex);
+        var hasParameterType = !string.IsNullOrEmpty(condition.ParameterType);
+        var hasParameterFilter = hasParameterExists || hasParameterNameRegex || hasParameterType;
+
+        if (!hasParameterFilter)
+        {
+            return ConditionMatchResult.Match([]);
+        }
+
+        var matchedParameters = parameters
+            .Where(parameter => MatchesParameterNameFilter(condition, parameter))
+            .Where(parameter => !hasParameterType || IsTypeMatch(parameter.TypeName, condition.ParameterType!))
+            .ToArray();
+
+        return matchedParameters.Length > 0
+            ? ConditionMatchResult.Match(matchedParameters)
+            : ConditionMatchResult.NoMatch;
     }
 
     private static IReadOnlyList<SqlRewriteAction> GetActions(SqlRewriteRule rule)
@@ -204,8 +235,70 @@ internal sealed class SqlRewriter
         return Regex.Replace(sql, action.Find, action.Replace, options, TimeSpan.FromSeconds(1));
     }
 
+    private static bool MatchesParameterNameFilter(SqlRewriteCondition condition, RewriteParameterInfo parameter)
+    {
+        var hasParameterExists = !string.IsNullOrEmpty(condition.ParameterExists);
+        var hasParameterNameRegex = !string.IsNullOrEmpty(condition.ParameterNameRegex);
+
+        if (!hasParameterExists && !hasParameterNameRegex)
+        {
+            return true;
+        }
+
+        if (hasParameterExists && IsParameterNameMatch(parameter.Name, condition.ParameterExists!))
+        {
+            return true;
+        }
+
+        if (hasParameterNameRegex)
+        {
+            var options = RegexOptions.CultureInvariant;
+
+            if (condition.IgnoreCase)
+            {
+                options |= RegexOptions.IgnoreCase;
+            }
+
+            return Regex.IsMatch(parameter.Name, condition.ParameterNameRegex!, options, TimeSpan.FromSeconds(1));
+        }
+
+        return false;
+    }
+
+    private static IReadOnlyList<string> GetParameterActionTargets(
+        SqlRewriteAction action,
+        IReadOnlyList<RewriteParameterInfo> matchedParameters)
+    {
+        if (!string.IsNullOrWhiteSpace(action.Name))
+        {
+            return [ParameterNameHelper.EnsureAtPrefix(action.Name)];
+        }
+
+        return matchedParameters
+            .Select(parameter => ParameterNameHelper.EnsureAtPrefix(parameter.Name))
+            .ToArray();
+    }
+
     private static bool IsParameterNameMatch(string actual, string expected)
     {
         return ParameterNameHelper.Equals(actual, expected);
+    }
+
+    private static bool IsTypeMatch(string actualTypeName, string expectedTypeName)
+    {
+        return string.Equals(
+            actualTypeName.Trim(),
+            expectedTypeName.Trim(),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed record ConditionMatchResult(bool IsMatch, IReadOnlyList<RewriteParameterInfo> MatchedParameters)
+    {
+        public static ConditionMatchResult Match(IReadOnlyList<RewriteParameterInfo> matchedParameters)
+        {
+            return new ConditionMatchResult(true, matchedParameters);
+        }
+
+        public static ConditionMatchResult NoMatch { get; } = new(false, []);
     }
 }
