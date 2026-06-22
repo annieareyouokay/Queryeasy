@@ -22,6 +22,8 @@ internal sealed class ProxyOptions
 
     public int BufferSizeBytes { get; init; } = 81920;
 
+    public ProxyLogLevel LogLevel { get; init; } = ProxyLogLevel.Info;
+
     public ProxyMode Mode { get; init; } = ProxyMode.InspectOnly;
 
     public bool LogPayloadPreview { get; init; } = true;
@@ -42,17 +44,29 @@ internal sealed class ProxyOptions
 
     public bool LogPreLoginOptions { get; init; } = true;
 
+    public int MaxConcurrentSessions { get; init; } = 500;
+
+    public int MaxInspectableMessageBytes { get; init; } = 1_048_576;
+
+    public int MaxRewriteSqlChars { get; init; } = 65_536;
+
+    public bool RejectWhenOverloaded { get; init; } = true;
+
+    public int MetricsSummaryIntervalSeconds { get; init; } = 30;
+
     public List<SqlRewriteRule> RewriteRules { get; init; } = [];
 
     public TimeSpan ConnectTimeout => TimeSpan.FromSeconds(ConnectTimeoutSeconds);
 
     public TimeSpan IdleTimeout => TimeSpan.FromMinutes(IdleTimeoutMinutes);
 
+    public TimeSpan MetricsSummaryInterval => TimeSpan.FromSeconds(MetricsSummaryIntervalSeconds);
+
     public static ProxyOptions Load(string path)
     {
         if (!File.Exists(path))
         {
-            Console.WriteLine($"Configuration file '{path}' was not found. Using defaults.");
+            ProxyLog.Warn($"Configuration file '{path}' was not found. Using defaults.");
             return new ProxyOptions();
         }
 
@@ -60,7 +74,7 @@ internal sealed class ProxyOptions
 
         if (!document.RootElement.TryGetProperty("Proxy", out var proxySection))
         {
-            Console.WriteLine("Configuration section 'Proxy' was not found. Using defaults.");
+            ProxyLog.Warn("Configuration section 'Proxy' was not found. Using defaults.");
             return new ProxyOptions();
         }
 
@@ -116,6 +130,91 @@ internal sealed class ProxyOptions
         {
             throw new InvalidOperationException($"{nameof(MaxSqlLogChars)} must not be negative.");
         }
+
+        if (MaxConcurrentSessions <= 0)
+        {
+            throw new InvalidOperationException($"{nameof(MaxConcurrentSessions)} must be greater than zero.");
+        }
+
+        if (MaxInspectableMessageBytes < Tds.TdsPacket.HeaderLength)
+        {
+            throw new InvalidOperationException($"{nameof(MaxInspectableMessageBytes)} must be at least {Tds.TdsPacket.HeaderLength}.");
+        }
+
+        if (MaxRewriteSqlChars < 0)
+        {
+            throw new InvalidOperationException($"{nameof(MaxRewriteSqlChars)} must not be negative.");
+        }
+
+        if (MetricsSummaryIntervalSeconds < 0)
+        {
+            throw new InvalidOperationException($"{nameof(MetricsSummaryIntervalSeconds)} must not be negative.");
+        }
+
+        ValidateRewriteRules();
+    }
+
+    private void ValidateRewriteRules()
+    {
+        foreach (var rule in RewriteRules.Where(rule => rule.Enabled))
+        {
+            if (string.IsNullOrWhiteSpace(rule.Name))
+            {
+                throw new InvalidOperationException("Rewrite rule name must not be empty.");
+            }
+
+            if (rule.Actions.Count == 0 && string.IsNullOrEmpty(rule.Find))
+            {
+                continue;
+            }
+
+            foreach (var action in rule.Actions)
+            {
+                ValidateRewriteAction(rule, action);
+            }
+        }
+    }
+
+    private static void ValidateRewriteAction(SqlRewriteRule rule, SqlRewriteAction action)
+    {
+        switch (action.Type)
+        {
+            case SqlRewriteActionType.ReplaceSql:
+                if (string.IsNullOrEmpty(action.Find))
+                {
+                    throw new InvalidOperationException($"Rule '{rule.Name}' action ReplaceSql requires Find.");
+                }
+
+                break;
+
+            case SqlRewriteActionType.SetParameterValue:
+                ValidateParameterActionName(rule, action);
+
+                if (action.Value is null)
+                {
+                    throw new InvalidOperationException($"Rule '{rule.Name}' action SetParameterValue for '{action.Name}' requires Value.");
+                }
+
+                break;
+
+            case SqlRewriteActionType.SetParameterType:
+                ValidateParameterActionName(rule, action);
+
+                if (string.IsNullOrWhiteSpace(action.SqlType))
+                {
+                    throw new InvalidOperationException($"Rule '{rule.Name}' action SetParameterType for '{action.Name}' requires SqlType.");
+                }
+
+                break;
+        }
+    }
+
+    private static void ValidateParameterActionName(SqlRewriteRule rule, SqlRewriteAction action)
+    {
+        if (string.IsNullOrWhiteSpace(action.Name))
+        {
+            throw new InvalidOperationException($"Rule '{rule.Name}' action {action.Type} requires Name.");
+        }
     }
 
     private static void ValidatePort(int port, string name)
@@ -145,6 +244,7 @@ internal sealed class ProxyOptions
             ConnectTimeoutSeconds = ConnectTimeoutSeconds,
             IdleTimeoutMinutes = IdleTimeoutMinutes,
             BufferSizeBytes = BufferSizeBytes,
+            LogLevel = LogLevel,
             Mode = Mode,
             LogPayloadPreview = LogPayloadPreview,
             LogSqlText = LogSqlText,
@@ -155,6 +255,11 @@ internal sealed class ProxyOptions
             PreLoginEncryptionMode = PreLoginEncryptionMode,
             FailIfEncryptionRequired = FailIfEncryptionRequired,
             LogPreLoginOptions = LogPreLoginOptions,
+            MaxConcurrentSessions = MaxConcurrentSessions,
+            MaxInspectableMessageBytes = MaxInspectableMessageBytes,
+            MaxRewriteSqlChars = MaxRewriteSqlChars,
+            RejectWhenOverloaded = RejectWhenOverloaded,
+            MetricsSummaryIntervalSeconds = MetricsSummaryIntervalSeconds,
             RewriteRules = rewriteRules
         };
     }

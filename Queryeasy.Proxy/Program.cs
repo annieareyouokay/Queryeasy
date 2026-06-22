@@ -7,6 +7,8 @@ var configPath = args.Length > 0
         : Path.Combine(AppContext.BaseDirectory, "appsettings.json");
 var options = ProxyOptions.Load(configPath);
 options.Validate();
+ProxyLog.Configure(options.LogLevel);
+var metrics = new ProxyMetrics();
 
 using var shutdown = new CancellationTokenSource();
 
@@ -16,7 +18,7 @@ Console.CancelKeyPress += (_, eventArgs) =>
     shutdown.Cancel();
 };
 
-var server = new SqlProxyServer(options);
+var server = new SqlProxyServer(options, metrics);
 
 try
 {
@@ -24,5 +26,5 @@ try
 }
 catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
 {
-    Console.WriteLine("Proxy stopped.");
+    ProxyLog.Info("Proxy stopped.");
 }

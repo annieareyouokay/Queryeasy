@@ -21,19 +21,20 @@ Queryeasy - это локальный TCP-прокси для Microsoft SQL Serv
 
 ```text
 Queryeasy/
-└── Queryeasy.Proxy/
-    ├── Program.cs
-    ├── ProxyOptions.cs
-    ├── ProxySession.cs
-    ├── SqlProxyServer.cs
-    ├── appsettings.json
-    ├── appsettings.PassThrough.json
-    ├── appsettings.RequirePlainText.json
-    ├── Rewrite/
-    └── Tds/
+├── Queryeasy.Proxy/
+│   ├── Program.cs
+│   ├── ProxyOptions.cs
+│   ├── ProxySession.cs
+│   ├── SqlProxyServer.cs
+│   ├── appsettings.json
+│   ├── appsettings.Production.json
+│   ├── Rewrite/
+│   └── Tds/
+├── Queryeasy.Proxy.Tests/
+└── tools/
 ```
 
-В репозитории нет `.sln`-файла и отдельного тестового проекта. Сборка и запуск выполняются напрямую через `Queryeasy.Proxy/Queryeasy.Proxy.csproj`.
+В репозитории нет `.sln`-файла. Сборка, запуск и тесты выполняются напрямую через `.csproj`.
 
 ## Требования
 
@@ -459,7 +460,56 @@ dotnet run --project .\Queryeasy.Proxy\Queryeasy.Proxy.csproj
 dotnet publish .\Queryeasy.Proxy\Queryeasy.Proxy.csproj -c Release
 ```
 
-Так как тестового проекта нет, базовая ручная проверка выглядит так:
+## Production hardening
+
+Для production-like запуска используйте `Queryeasy.Proxy/appsettings.Production.json` как отправную точку:
+
+```powershell
+dotnet run --project .\Queryeasy.Proxy\Queryeasy.Proxy.csproj -- .\Queryeasy.Proxy\appsettings.Production.json
+```
+
+Ключевые значения в production-конфиге:
+
+```json
+"Mode": "DryRun",
+"RewriteFailureBehavior": "FailOpen",
+"LogPayloadPreview": false,
+"LogSqlText": false,
+"LogRewriteSqlText": false,
+"LogLevel": "Info",
+"MaxConcurrentSessions": 500,
+"MaxInspectableMessageBytes": 1048576,
+"MaxRewriteSqlChars": 65536
+```
+
+Перед переключением на `Rewrite` прогоните правила в `DryRun` и проверьте метрики в summary-логах. Подробное SQL/payload логирование в production лучше включать только временно и точечно.
+
+### Load harness
+
+В `tools/load-harness.ps1` есть простой PowerShell 7 сценарий для сравнения прямого подключения и подключения через прокси:
+
+```powershell
+pwsh .\tools\load-harness.ps1 `
+  -ConnectionString "Server=127.0.0.1,11433;Database=testdb;Integrated Security=true;TrustServerCertificate=true" `
+  -Query "SELECT 1" `
+  -Concurrency 16 `
+  -IterationsPerWorker 100
+```
+
+Сравните результаты для:
+
+- прямого подключения к SQL Server;
+- прокси в `ForwardOnly`;
+- прокси в `InspectOnly`;
+- прокси в `Rewrite`.
+
+Так как тестовый проект появился, базовая автоматическая проверка:
+
+```powershell
+dotnet test .\Queryeasy.Proxy.Tests\Queryeasy.Proxy.Tests.csproj
+```
+
+Базовая ручная проверка выглядит так:
 
 1. Запустить SQL Server на `TargetHost:TargetPort`.
 2. Запустить Queryeasy.

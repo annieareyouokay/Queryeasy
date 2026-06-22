@@ -75,6 +75,7 @@ internal sealed class RpcParameterEncoding
         int valueLength,
         byte typeId,
         int? maxLength,
+        byte? scale,
         bool isUnicode,
         byte[]? collation)
     {
@@ -88,6 +89,7 @@ internal sealed class RpcParameterEncoding
         ValueLength = valueLength;
         TypeId = typeId;
         MaxLength = maxLength;
+        Scale = scale;
         IsUnicode = isUnicode;
         Collation = collation;
     }
@@ -111,6 +113,8 @@ internal sealed class RpcParameterEncoding
     public byte TypeId { get; }
 
     public int? MaxLength { get; }
+
+    public byte? Scale { get; }
 
     public bool IsUnicode { get; }
 

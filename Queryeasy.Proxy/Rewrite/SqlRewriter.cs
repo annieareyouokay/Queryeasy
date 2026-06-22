@@ -73,6 +73,13 @@ internal sealed class SqlRewriter
                         case SqlRewriteActionType.SetParameterType:
                             if (!string.IsNullOrWhiteSpace(action.Name))
                             {
+                                if (string.IsNullOrWhiteSpace(action.SqlType))
+                                {
+                                    return RewriteResult.Failed(
+                                        sql,
+                                        $"Rule '{rule.Name}' action SetParameterType for '{action.Name}' requires SqlType.");
+                                }
+
                                 parameterChanges.Add(new RewriteParameterChange(
                                     action.Name,
                                     null,

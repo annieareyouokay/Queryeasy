@@ -118,6 +118,7 @@ internal static class RpcRequestInspector
             value.ValueLength,
             type.TypeId,
             type.MaxLength,
+            type.Scale,
             type.IsUnicode,
             type.Collation);
 
@@ -133,9 +134,9 @@ internal static class RpcRequestInspector
             0x24 => new RpcTypeInfo(typeId, "uniqueidentifier", 16, null, false, null),
             0x26 => new RpcTypeInfo(typeId, "intn", ReadByte(payload, ref offset), null, false, null),
             0x28 => new RpcTypeInfo(typeId, "date", null, null, false, null),
-            0x29 => new RpcTypeInfo(typeId, "time", null, ReadByte(payload, ref offset), false, null),
-            0x2A => new RpcTypeInfo(typeId, "datetime2", null, ReadByte(payload, ref offset), false, null),
-            0x2B => new RpcTypeInfo(typeId, "datetimeoffset", null, ReadByte(payload, ref offset), false, null),
+            0x29 => ReadScaledType(payload, ref offset, typeId, "time"),
+            0x2A => ReadScaledType(payload, ref offset, typeId, "datetime2"),
+            0x2B => ReadScaledType(payload, ref offset, typeId, "datetimeoffset"),
             0x30 => new RpcTypeInfo(typeId, "tinyint", 1, null, false, null),
             0x32 => new RpcTypeInfo(typeId, "bit", 1, null, false, null),
             0x34 => new RpcTypeInfo(typeId, "smallint", 2, null, false, null),
@@ -172,6 +173,12 @@ internal static class RpcRequestInspector
         var scale = ReadByte(payload, ref offset);
 
         return new RpcTypeInfo(typeId, $"{typeName}({precision},{scale})", length, scale, false, null);
+    }
+
+    private static RpcTypeInfo ReadScaledType(byte[] payload, ref int offset, byte typeId, string typeName)
+    {
+        var scale = ReadByte(payload, ref offset);
+        return new RpcTypeInfo(typeId, $"{typeName}({scale})", null, scale, false, null);
     }
 
     private static RpcTypeInfo ReadTextType(
@@ -231,9 +238,9 @@ internal static class RpcRequestInspector
             0x30 or 0x32 or 0x34 or 0x38 or 0x3A or 0x3B or 0x3C or 0x3D or 0x3E or 0x7F => ReadFixedValue(payload, ref offset, type.FixedLength ?? 0, type.TypeId),
             0x6A or 0x6C => ReadDecimalValue(payload, ref offset),
             0x28 => ReadHexValue(payload, ref offset, 3),
-            0x29 => ReadHexValue(payload, ref offset, GetTimeValueLength(type.Scale ?? 0)),
-            0x2A => ReadHexValue(payload, ref offset, GetTimeValueLength(type.Scale ?? 0) + 3),
-            0x2B => ReadHexValue(payload, ref offset, GetTimeValueLength(type.Scale ?? 0) + 5),
+            0x29 => ReadHexValue(payload, ref offset, TdsDateTime2Helper.GetTimeValueLength(type.Scale ?? 0)),
+            0x2A => ReadDateTime2Value(payload, ref offset, type.Scale ?? 0),
+            0x2B => ReadHexValue(payload, ref offset, TdsDateTime2Helper.GetTimeValueLength(type.Scale ?? 0) + 5),
             0x22 or 0x23 or 0x63 => ReadTextValue(payload, ref offset, type),
             0xA5 or 0xA7 or 0xAD or 0xAF or 0xE7 or 0xEF => ReadVariableValue(payload, ref offset, type),
             _ => throw new RpcParseException($"Unsupported RPC parameter value type 0x{type.TypeId:X2}.")
@@ -334,14 +341,30 @@ internal static class RpcRequestInspector
         return new RpcValueReadResult($"0x{Convert.ToHexString(bytes)}", -1, 0, valueOffset, bytes.Length);
     }
 
-    private static int GetTimeValueLength(byte scale)
+    private static RpcValueReadResult ReadDateTime2Value(byte[] payload, ref int offset, byte scale)
     {
-        return scale switch
+        var valueLengthOffset = offset;
+        var length = ReadByte(payload, ref offset);
+
+        if (length == 0)
         {
-            <= 2 => 3,
-            <= 4 => 4,
-            _ => 5
-        };
+            return new RpcValueReadResult(null, valueLengthOffset, 1, offset, 0);
+        }
+
+        var valueOffset = offset;
+        var bytes = ReadFixedBytes(payload, ref offset, length);
+        string value;
+
+        try
+        {
+            value = TdsDateTime2Helper.Format(TdsDateTime2Helper.Decode(bytes, scale));
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or ArgumentOutOfRangeException)
+        {
+            value = $"0x{Convert.ToHexString(bytes)}";
+        }
+
+        return new RpcValueReadResult(value, valueLengthOffset, 1, valueOffset, bytes.Length);
     }
 
     private static RpcValueReadResult ReadVariableValue(byte[] payload, ref int offset, RpcTypeInfo type)

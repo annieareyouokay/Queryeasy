@@ -17,6 +17,7 @@ internal static class RpcSpExecuteSqlEncoder
         IReadOnlyList<RewriteParameterChange> parameterChanges)
     {
         var replacements = new List<PayloadReplacement>();
+        var parameterDeclaration = request.ParameterDeclaration;
 
         if (!string.Equals(request.Statement, statement, StringComparison.Ordinal))
         {
@@ -31,9 +32,24 @@ internal static class RpcSpExecuteSqlEncoder
             var value = changeGroup.LastOrDefault(change => change.Value is not null)?.Value ?? parameter.Value;
             var sqlType = changeGroup.LastOrDefault(change => change.SqlType is not null)?.SqlType;
 
+            if (sqlType is not null && parameterDeclaration is not null)
+            {
+                parameterDeclaration = TdsDateTime2Helper.ReplaceTypeInDeclaration(
+                    parameterDeclaration,
+                    changeGroup.Key,
+                    sqlType);
+            }
+
             replacements.Add(sqlType is null
                 ? BuildValueReplacement(parameter, value)
                 : BuildParameterReplacement(parameter, sqlType, value, FindCollation(request)));
+        }
+
+        if (parameterDeclaration is not null
+            && request.Parameters.Count > 1
+            && !string.Equals(request.ParameterDeclaration, parameterDeclaration, StringComparison.Ordinal))
+        {
+            replacements.Add(BuildValueReplacement(request.Parameters[1], parameterDeclaration));
         }
 
         return ApplyReplacements(request.Payload, replacements);
@@ -87,6 +103,7 @@ internal static class RpcSpExecuteSqlEncoder
             0x34 => new EncodedValue(EncodeInt16(value), 2),
             0x38 => new EncodedValue(EncodeInt32(value), 4),
             0x7F => new EncodedValue(EncodeInt64(value), 8),
+            0x2A => EncodeDateTime2Value(value, encoding.Scale ?? 7),
             0x63 or 0xE7 or 0xEF => EncodeUnicodeText(value),
             0xA7 or 0xAF => EncodeAnsiText(value),
             _ => throw new InvalidOperationException(
@@ -138,7 +155,7 @@ internal static class RpcSpExecuteSqlEncoder
                 break;
 
             case "datetime2":
-                WriteDateTime2Parameter(stream, value);
+                WriteDateTime2Parameter(stream, value, sqlType);
                 break;
 
             default:
@@ -197,7 +214,7 @@ internal static class RpcSpExecuteSqlEncoder
         stream.Write(valueBytes);
     }
 
-    private static void WriteDateTime2Parameter(Stream stream, string? value)
+    private static void WriteDateTime2Parameter(Stream stream, string? value, string sqlType)
     {
         if (value is null)
         {
@@ -205,10 +222,12 @@ internal static class RpcSpExecuteSqlEncoder
         }
 
         var dateTime = DateTime.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
-        var scale = (byte)7;
+        var scale = TdsDateTime2Helper.ParseScaleOrDefault(sqlType);
+        var bytes = TdsDateTime2Helper.Encode(dateTime, scale);
         stream.WriteByte(0x2A);
         stream.WriteByte(scale);
-        stream.Write(EncodeDateTime2(dateTime, scale));
+        stream.WriteByte((byte)bytes.Length);
+        stream.Write(bytes);
     }
 
     private static EncodedValue EncodeNullableInteger(string? value, int length)
@@ -252,6 +271,19 @@ internal static class RpcSpExecuteSqlEncoder
         return value is null
             ? new EncodedValue([], ushort.MaxValue)
             : new EncodedValue(TextEncoding.GetBytes(value), TextEncoding.GetByteCount(value));
+    }
+
+    private static EncodedValue EncodeDateTime2Value(string? value, byte scale)
+    {
+        if (value is null)
+        {
+            return new EncodedValue([], 0);
+        }
+
+        var dateTime = DateTime.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        var bytes = TdsDateTime2Helper.Encode(dateTime, scale);
+
+        return new EncodedValue(bytes, bytes.Length);
     }
 
     private static void WriteNullableIntegerValue(Stream stream, string? value, int length)
@@ -308,30 +340,6 @@ internal static class RpcSpExecuteSqlEncoder
     {
         return value == "1"
             || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static byte[] EncodeDateTime2(DateTime value, byte scale)
-    {
-        var timeLength = scale switch
-        {
-            <= 2 => 3,
-            <= 4 => 4,
-            _ => 5
-        };
-        var timeUnits = value.TimeOfDay.Ticks / (long)Math.Pow(10, 7 - scale);
-        var days = (value.Date - DateTime.MinValue.Date).Days;
-        var bytes = new byte[timeLength + 3];
-
-        for (var i = 0; i < timeLength; i++)
-        {
-            bytes[i] = (byte)(timeUnits >> (8 * i));
-        }
-
-        bytes[timeLength] = (byte)days;
-        bytes[timeLength + 1] = (byte)(days >> 8);
-        bytes[timeLength + 2] = (byte)(days >> 16);
-
-        return bytes;
     }
 
     private static byte[] FindCollation(RpcSpExecuteSqlRequest request)
