@@ -1,10 +1,23 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
+using Queryeasy.Proxy.Rewrite;
 
 namespace Queryeasy.Proxy.Tds;
 
 internal static class TdsDateTime2Helper
 {
+    private static readonly long[] TickScaleFactors =
+    [
+        10_000_000,
+        1_000_000,
+        100_000,
+        10_000,
+        1_000,
+        100,
+        10,
+        1
+    ];
+
     private static readonly Regex ScaleRegex = new(
         @"\(\s*(\d+)\s*\)",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -61,7 +74,7 @@ internal static class TdsDateTime2Helper
         var days = bytes[timeLength]
             | (bytes[timeLength + 1] << 8)
             | (bytes[timeLength + 2] << 16);
-        var ticks = timeUnits * (long)Math.Pow(10, 7 - scale);
+        var ticks = timeUnits * GetTickScaleFactor(scale);
 
         return DateTime.MinValue.Date.AddDays(days).AddTicks(ticks);
     }
@@ -69,7 +82,7 @@ internal static class TdsDateTime2Helper
     public static byte[] Encode(DateTime value, byte scale)
     {
         var timeLength = GetTimeValueLength(scale);
-        var timeUnits = value.TimeOfDay.Ticks / (long)Math.Pow(10, 7 - scale);
+        var timeUnits = value.TimeOfDay.Ticks / GetTickScaleFactor(scale);
         var days = (value.Date - DateTime.MinValue.Date).Days;
         var bytes = new byte[timeLength + 3];
 
@@ -92,7 +105,7 @@ internal static class TdsDateTime2Helper
 
     public static string ReplaceTypeInDeclaration(string declaration, string parameterName, string newSqlType)
     {
-        var normalizedName = parameterName.StartsWith('@') ? parameterName : $"@{parameterName}";
+        var normalizedName = ParameterNameHelper.EnsureAtPrefix(parameterName);
         var pattern = $@"(?<name>{Regex.Escape(normalizedName)}\s+)(?<type>[A-Za-z_][A-Za-z0-9_]*(\s*\([^)]*\))?)";
 
         return Regex.Replace(
@@ -100,5 +113,12 @@ internal static class TdsDateTime2Helper
             pattern,
             match => $"{match.Groups["name"].Value}{newSqlType}",
             RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    }
+
+    private static long GetTickScaleFactor(byte scale)
+    {
+        return scale <= 7
+            ? TickScaleFactors[scale]
+            : throw new InvalidOperationException($"datetime2 scale '{scale}' is invalid. Expected 0..7.");
     }
 }

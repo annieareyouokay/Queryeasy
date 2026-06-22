@@ -1,4 +1,5 @@
-﻿using Queryeasy.Proxy.Rewrite;
+﻿using Queryeasy.Proxy;
+using Queryeasy.Proxy.Rewrite;
 using Queryeasy.Proxy.Tds;
 using System.Text;
 
@@ -28,6 +29,78 @@ public class UnitTest1
 
         Assert.Equal(new DateTime(2026, 6, 22, 13, 14, 15), decoded);
         Assert.Equal(6, bytes.Length);
+    }
+
+    [Fact]
+    public void DateTime2Helper_RoundTripsScaleSeven()
+    {
+        var value = new DateTime(2026, 6, 22, 13, 14, 15).AddTicks(1_234_567);
+        var bytes = TdsDateTime2Helper.Encode(value, 7);
+
+        var decoded = TdsDateTime2Helper.Decode(bytes, 7);
+
+        Assert.Equal(value, decoded);
+        Assert.Equal(8, bytes.Length);
+    }
+
+    [Theory]
+    [InlineData("@P1", "P1")]
+    [InlineData("P1", "P1")]
+    public void ParameterNameHelper_NormalizesAtPrefix(string input, string expected)
+    {
+        Assert.Equal(expected, ParameterNameHelper.Normalize(input));
+    }
+
+    [Fact]
+    public void ProxyOptions_LoadKeepsRootRewriteRulesAndHardeningDefaults()
+    {
+        var path = Path.GetTempFileName();
+
+        try
+        {
+            File.WriteAllText(
+                path,
+                """
+                {
+                  "Proxy": {
+                    "ListenHost": "127.0.0.1",
+                    "ListenPort": 11433,
+                    "TargetHost": "127.0.0.1",
+                    "TargetPort": 1433
+                  },
+                  "RewriteRules": [
+                    {
+                      "Name": "ChangeP1",
+                      "Enabled": true,
+                      "Scope": "RpcSpExecuteSql",
+                      "When": {
+                        "ParameterExists": "@P1"
+                      },
+                      "Actions": [
+                        {
+                          "Type": "SetParameterType",
+                          "Name": "@P1",
+                          "SqlType": "datetime2(0)"
+                        }
+                      ]
+                    }
+                  ]
+                }
+                """);
+
+            var options = ProxyOptions.Load(path);
+            options.Validate();
+
+            Assert.Equal(500, options.MaxConcurrentSessions);
+            Assert.Equal(1_048_576, options.MaxInspectableMessageBytes);
+            Assert.Equal(65_536, options.MaxRewriteSqlChars);
+            Assert.Single(options.RewriteRules);
+            Assert.Equal(QueryRewriteScope.RpcSpExecuteSql, options.RewriteRules[0].Scope);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     [Fact]
@@ -92,7 +165,7 @@ public class UnitTest1
         var p1StartOffset = offset;
         payload[offset++] = 0x00; // unnamed parameter
         payload[offset++] = 0x00; // status
-        payload[offset++] = 0x2A; // datetime2
+        payload[offset++] = TdsRpcTypeIds.DateTime2;
         payload[offset++] = 0x03; // scale
         payload[offset++] = (byte)p1ValueBytes.Length;
         p1ValueBytes.CopyTo(payload.AsSpan(offset));
@@ -118,7 +191,7 @@ public class UnitTest1
                         2,
                         paramsValueOffset,
                         declarationBytes.Length,
-                        0xE7,
+                        TdsRpcTypeIds.NVarChar,
                         declarationBytes.Length,
                         null,
                         true,
@@ -137,7 +210,7 @@ public class UnitTest1
                         1,
                         p1StartOffset + 5,
                         p1ValueBytes.Length,
-                        0x2A,
+                        TdsRpcTypeIds.DateTime2,
                         null,
                         3,
                         false,
@@ -152,7 +225,7 @@ public class UnitTest1
         var rewrittenText = Encoding.Unicode.GetString(rewritten);
 
         Assert.Contains("datetime2(0)", rewrittenText);
-        Assert.True(ContainsSequence(rewritten, [0x2A, 0x00, 0x06]));
+        Assert.True(ContainsSequence(rewritten, [TdsRpcTypeIds.DateTime2, 0x00, 0x06]));
     }
 
     private static RpcParameterInspectionResult CreateParameter(

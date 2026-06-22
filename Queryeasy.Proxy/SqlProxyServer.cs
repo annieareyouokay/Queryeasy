@@ -48,7 +48,7 @@ internal sealed class SqlProxyServer
         {
             listener.Stop();
             await metricsCancellation.CancelAsync();
-            await ObserveBackgroundTaskAsync(metricsSummary);
+            await TaskObservation.IgnoreCancellationAsync(metricsSummary);
         }
     }
 
@@ -62,9 +62,17 @@ internal sealed class SqlProxyServer
 
         if (!_options.RejectWhenOverloaded)
         {
-            await _sessionSlots.WaitAsync(cancellationToken);
-            _metrics.SessionAccepted();
-            return true;
+            try
+            {
+                await _sessionSlots.WaitAsync(cancellationToken);
+                _metrics.SessionAccepted();
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                client.Dispose();
+                throw;
+            }
         }
 
         _metrics.SessionRejected();
@@ -114,17 +122,6 @@ internal sealed class SqlProxyServer
         while (await timer.WaitForNextTickAsync(cancellationToken))
         {
             ProxyLog.Info(_metrics.BuildSummary());
-        }
-    }
-
-    private static async Task ObserveBackgroundTaskAsync(Task task)
-    {
-        try
-        {
-            await task;
-        }
-        catch (OperationCanceledException)
-        {
         }
     }
 

@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Queryeasy.Proxy.Rewrite;
 
 namespace Queryeasy.Proxy.Tds;
 
@@ -29,11 +30,11 @@ internal static class SpExecuteSqlParameterHelper
         RpcSpExecuteSqlRequest request,
         string logicalName)
     {
-        var normalized = NormalizeParameterName(logicalName);
-        var sqlParameters = request.SqlParameters.ToList();
+        var normalized = ParameterNameHelper.Normalize(logicalName);
+        var sqlParameters = request.SqlParameters;
 
         var directMatch = sqlParameters.FirstOrDefault(parameter =>
-            string.Equals(NormalizeParameterName(parameter.Name), normalized, StringComparison.OrdinalIgnoreCase));
+            string.Equals(ParameterNameHelper.Normalize(parameter.Name), normalized, StringComparison.OrdinalIgnoreCase));
 
         if (directMatch is not null)
         {
@@ -43,7 +44,7 @@ internal static class SpExecuteSqlParameterHelper
         var declaredNames = ParseDeclaredParameterNames(request.ParameterDeclaration);
         for (var index = 0; index < declaredNames.Count; index++)
         {
-            if (string.Equals(NormalizeParameterName(declaredNames[index]), normalized, StringComparison.OrdinalIgnoreCase)
+            if (string.Equals(ParameterNameHelper.Normalize(declaredNames[index]), normalized, StringComparison.OrdinalIgnoreCase)
                 && index < sqlParameters.Count)
             {
                 return sqlParameters[index];
@@ -66,8 +67,4 @@ internal static class SpExecuteSqlParameterHelper
             .ToArray();
     }
 
-    private static string NormalizeParameterName(string name)
-    {
-        return name.StartsWith('@') ? name[1..] : name;
-    }
 }

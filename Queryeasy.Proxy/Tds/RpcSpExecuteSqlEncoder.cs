@@ -24,7 +24,7 @@ internal static class RpcSpExecuteSqlEncoder
             replacements.Add(BuildValueReplacement(request.Parameters[0], statement));
         }
 
-        foreach (var changeGroup in parameterChanges.GroupBy(change => NormalizeParameterName(change.Name)))
+        foreach (var changeGroup in parameterChanges.GroupBy(change => ParameterNameHelper.Normalize(change.Name)))
         {
             var parameter = SpExecuteSqlParameterHelper.ResolveParameter(request, changeGroup.Key)
                 ?? throw new InvalidOperationException($"RPC parameter '{changeGroup.Key}' was not found.");
@@ -96,15 +96,15 @@ internal static class RpcSpExecuteSqlEncoder
 
         return encoding.TypeId switch
         {
-            0x24 => new EncodedValue(EncodeGuid(value), 16),
-            0x26 => EncodeNullableInteger(value, encoding.MaxLength ?? 4),
+            TdsRpcTypeIds.UniqueIdentifier => new EncodedValue(EncodeGuid(value), 16),
+            TdsRpcTypeIds.IntN => EncodeNullableInteger(value, encoding.MaxLength ?? 4),
             0x30 => new EncodedValue([ParseByte(value)], 1),
             0x32 or 0x68 => EncodeNullableBit(value, encoding.TypeId == 0x68),
             0x34 => new EncodedValue(EncodeInt16(value), 2),
-            0x38 => new EncodedValue(EncodeInt32(value), 4),
-            0x7F => new EncodedValue(EncodeInt64(value), 8),
-            0x2A => EncodeDateTime2Value(value, encoding.Scale ?? 7),
-            0x63 or 0xE7 or 0xEF => EncodeUnicodeText(value),
+            TdsRpcTypeIds.Int => new EncodedValue(EncodeInt32(value), 4),
+            TdsRpcTypeIds.BigInt => new EncodedValue(EncodeInt64(value), 8),
+            TdsRpcTypeIds.DateTime2 => EncodeDateTime2Value(value, encoding.Scale ?? 7),
+            TdsRpcTypeIds.NText or TdsRpcTypeIds.NVarChar or TdsRpcTypeIds.NChar => EncodeUnicodeText(value),
             0xA7 or 0xAF => EncodeAnsiText(value),
             _ => throw new InvalidOperationException(
                 $"RPC parameter '{parameter.Name}' type '{parameter.TypeName}' cannot be rewritten yet.")
@@ -124,19 +124,19 @@ internal static class RpcSpExecuteSqlEncoder
         switch (NormalizeSqlType(sqlType))
         {
             case "int":
-                stream.WriteByte(0x26);
+                stream.WriteByte(TdsRpcTypeIds.IntN);
                 stream.WriteByte(4);
                 WriteNullableIntegerValue(stream, value, 4);
                 break;
 
             case "bigint":
-                stream.WriteByte(0x26);
+                stream.WriteByte(TdsRpcTypeIds.IntN);
                 stream.WriteByte(8);
                 WriteNullableIntegerValue(stream, value, 8);
                 break;
 
             case "bit":
-                stream.WriteByte(0x68);
+                stream.WriteByte(TdsRpcTypeIds.BitN);
                 stream.WriteByte(1);
                 WriteNullableBitValue(stream, value);
                 break;
@@ -150,7 +150,7 @@ internal static class RpcSpExecuteSqlEncoder
                 break;
 
             case "uniqueidentifier":
-                stream.WriteByte(0x24);
+                stream.WriteByte(TdsRpcTypeIds.UniqueIdentifier);
                 stream.Write(EncodeGuid(value));
                 break;
 
@@ -181,7 +181,7 @@ internal static class RpcSpExecuteSqlEncoder
 
     private static void WriteNVarCharParameter(Stream stream, string? value, byte[] collation)
     {
-        stream.WriteByte(0xE7);
+        stream.WriteByte(TdsRpcTypeIds.NVarChar);
         var valueBytes = value is null ? [] : SqlEncoding.GetBytes(value);
         var maxLength = checked((ushort)Math.Max(valueBytes.Length, 1));
         WriteUInt16(stream, maxLength);
@@ -199,7 +199,7 @@ internal static class RpcSpExecuteSqlEncoder
 
     private static void WriteNTextParameter(Stream stream, string? value, byte[] collation)
     {
-        stream.WriteByte(0x63);
+        stream.WriteByte(TdsRpcTypeIds.NText);
         var valueBytes = value is null ? [] : SqlEncoding.GetBytes(value);
         WriteUInt32(stream, checked((uint)Math.Max(valueBytes.Length, 1)));
         stream.Write(collation);
@@ -224,7 +224,7 @@ internal static class RpcSpExecuteSqlEncoder
         var dateTime = DateTime.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
         var scale = TdsDateTime2Helper.ParseScaleOrDefault(sqlType);
         var bytes = TdsDateTime2Helper.Encode(dateTime, scale);
-        stream.WriteByte(0x2A);
+        stream.WriteByte(TdsRpcTypeIds.DateTime2);
         stream.WriteByte(scale);
         stream.WriteByte((byte)bytes.Length);
         stream.Write(bytes);
@@ -407,11 +407,6 @@ internal static class RpcSpExecuteSqlEncoder
         Span<byte> bytes = stackalloc byte[4];
         BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
         stream.Write(bytes);
-    }
-
-    private static string NormalizeParameterName(string name)
-    {
-        return name.StartsWith('@') ? name[1..] : name;
     }
 
     private static string NormalizeSqlType(string sqlType)

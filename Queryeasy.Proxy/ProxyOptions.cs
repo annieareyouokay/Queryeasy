@@ -6,8 +6,10 @@ using Queryeasy.Proxy.Tds.PreLogin;
 
 namespace Queryeasy.Proxy;
 
-internal sealed class ProxyOptions
+internal sealed record ProxyOptions
 {
+    private static readonly JsonSerializerOptions SerializerOptions = CreateSerializerOptions();
+
     public string ListenHost { get; init; } = IPAddress.Loopback.ToString();
 
     public int ListenPort { get; init; } = 11433;
@@ -78,12 +80,11 @@ internal sealed class ProxyOptions
             return new ProxyOptions();
         }
 
-        var serializerOptions = CreateSerializerOptions();
-        var options = proxySection.Deserialize<ProxyOptions>(serializerOptions) ?? new ProxyOptions();
+        var options = proxySection.Deserialize<ProxyOptions>(SerializerOptions) ?? new ProxyOptions();
 
         if (document.RootElement.TryGetProperty("RewriteRules", out var rewriteRulesSection))
         {
-            var rewriteRules = rewriteRulesSection.Deserialize<List<SqlRewriteRule>>(serializerOptions) ?? [];
+            var rewriteRules = rewriteRulesSection.Deserialize<List<SqlRewriteRule>>(SerializerOptions) ?? [];
 
             options = options.WithRewriteRules(rewriteRules);
         }
@@ -235,32 +236,6 @@ internal sealed class ProxyOptions
 
     private ProxyOptions WithRewriteRules(List<SqlRewriteRule> rewriteRules)
     {
-        return new ProxyOptions
-        {
-            ListenHost = ListenHost,
-            ListenPort = ListenPort,
-            TargetHost = TargetHost,
-            TargetPort = TargetPort,
-            ConnectTimeoutSeconds = ConnectTimeoutSeconds,
-            IdleTimeoutMinutes = IdleTimeoutMinutes,
-            BufferSizeBytes = BufferSizeBytes,
-            LogLevel = LogLevel,
-            Mode = Mode,
-            LogPayloadPreview = LogPayloadPreview,
-            LogSqlText = LogSqlText,
-            LogRewriteSqlText = LogRewriteSqlText,
-            PayloadPreviewBytes = PayloadPreviewBytes,
-            MaxSqlLogChars = MaxSqlLogChars,
-            RewriteFailureBehavior = RewriteFailureBehavior,
-            PreLoginEncryptionMode = PreLoginEncryptionMode,
-            FailIfEncryptionRequired = FailIfEncryptionRequired,
-            LogPreLoginOptions = LogPreLoginOptions,
-            MaxConcurrentSessions = MaxConcurrentSessions,
-            MaxInspectableMessageBytes = MaxInspectableMessageBytes,
-            MaxRewriteSqlChars = MaxRewriteSqlChars,
-            RejectWhenOverloaded = RejectWhenOverloaded,
-            MetricsSummaryIntervalSeconds = MetricsSummaryIntervalSeconds,
-            RewriteRules = rewriteRules
-        };
+        return this with { RewriteRules = rewriteRules };
     }
 }

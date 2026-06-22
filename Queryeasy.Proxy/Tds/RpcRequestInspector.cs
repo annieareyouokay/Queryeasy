@@ -131,37 +131,37 @@ internal static class RpcRequestInspector
 
         return typeId switch
         {
-            0x24 => new RpcTypeInfo(typeId, "uniqueidentifier", 16, null, false, null),
-            0x26 => new RpcTypeInfo(typeId, "intn", ReadByte(payload, ref offset), null, false, null),
-            0x28 => new RpcTypeInfo(typeId, "date", null, null, false, null),
-            0x29 => ReadScaledType(payload, ref offset, typeId, "time"),
-            0x2A => ReadScaledType(payload, ref offset, typeId, "datetime2"),
-            0x2B => ReadScaledType(payload, ref offset, typeId, "datetimeoffset"),
-            0x30 => new RpcTypeInfo(typeId, "tinyint", 1, null, false, null),
-            0x32 => new RpcTypeInfo(typeId, "bit", 1, null, false, null),
-            0x34 => new RpcTypeInfo(typeId, "smallint", 2, null, false, null),
-            0x38 => new RpcTypeInfo(typeId, "int", 4, null, false, null),
-            0x3A => new RpcTypeInfo(typeId, "smalldatetime", 4, null, false, null),
-            0x3B => new RpcTypeInfo(typeId, "real", 4, null, false, null),
-            0x3C => new RpcTypeInfo(typeId, "money", 8, null, false, null),
-            0x3D => new RpcTypeInfo(typeId, "datetime", 8, null, false, null),
-            0x3E => new RpcTypeInfo(typeId, "float", 8, null, false, null),
-            0x68 => new RpcTypeInfo(typeId, "bitn", ReadByte(payload, ref offset), null, false, null),
-            0x6A => ReadDecimalType(payload, ref offset, typeId, "decimaln"),
-            0x6C => ReadDecimalType(payload, ref offset, typeId, "numericn"),
-            0x6D => new RpcTypeInfo(typeId, "floatn", ReadByte(payload, ref offset), null, false, null),
-            0x6E => new RpcTypeInfo(typeId, "moneyn", ReadByte(payload, ref offset), null, false, null),
-            0x6F => new RpcTypeInfo(typeId, "datetimen", ReadByte(payload, ref offset), null, false, null),
-            0x7F => new RpcTypeInfo(typeId, "bigint", 8, null, false, null),
+            TdsRpcTypeIds.UniqueIdentifier => new RpcTypeInfo(typeId, "uniqueidentifier", 16, null, false, null),
+            TdsRpcTypeIds.IntN => new RpcTypeInfo(typeId, "intn", ReadByte(payload, ref offset), null, false, null),
+            TdsRpcTypeIds.Date => new RpcTypeInfo(typeId, "date", null, null, false, null),
+            TdsRpcTypeIds.Time => ReadScaledType(payload, ref offset, typeId, "time"),
+            TdsRpcTypeIds.DateTime2 => ReadScaledType(payload, ref offset, typeId, "datetime2"),
+            TdsRpcTypeIds.DateTimeOffset => ReadScaledType(payload, ref offset, typeId, "datetimeoffset"),
+            TdsRpcTypeIds.TinyInt => new RpcTypeInfo(typeId, "tinyint", 1, null, false, null),
+            TdsRpcTypeIds.Bit => new RpcTypeInfo(typeId, "bit", 1, null, false, null),
+            TdsRpcTypeIds.SmallInt => new RpcTypeInfo(typeId, "smallint", 2, null, false, null),
+            TdsRpcTypeIds.Int => new RpcTypeInfo(typeId, "int", 4, null, false, null),
+            TdsRpcTypeIds.SmallDateTime => new RpcTypeInfo(typeId, "smalldatetime", 4, null, false, null),
+            TdsRpcTypeIds.Real => new RpcTypeInfo(typeId, "real", 4, null, false, null),
+            TdsRpcTypeIds.Money => new RpcTypeInfo(typeId, "money", 8, null, false, null),
+            TdsRpcTypeIds.DateTime => new RpcTypeInfo(typeId, "datetime", 8, null, false, null),
+            TdsRpcTypeIds.Float => new RpcTypeInfo(typeId, "float", 8, null, false, null),
+            TdsRpcTypeIds.BitN => new RpcTypeInfo(typeId, "bitn", ReadByte(payload, ref offset), null, false, null),
+            TdsRpcTypeIds.DecimalN => ReadDecimalType(payload, ref offset, typeId, "decimaln"),
+            TdsRpcTypeIds.NumericN => ReadDecimalType(payload, ref offset, typeId, "numericn"),
+            TdsRpcTypeIds.FloatN => new RpcTypeInfo(typeId, "floatn", ReadByte(payload, ref offset), null, false, null),
+            TdsRpcTypeIds.MoneyN => new RpcTypeInfo(typeId, "moneyn", ReadByte(payload, ref offset), null, false, null),
+            TdsRpcTypeIds.DateTimeN => new RpcTypeInfo(typeId, "datetimen", ReadByte(payload, ref offset), null, false, null),
+            TdsRpcTypeIds.BigInt => new RpcTypeInfo(typeId, "bigint", 8, null, false, null),
             0x22 => ReadTextType(payload, ref offset, typeId, "image", false),
             0x23 => ReadTextType(payload, ref offset, typeId, "text", false),
-            0x63 => ReadTextType(payload, ref offset, typeId, "ntext", true),
+            TdsRpcTypeIds.NText => ReadTextType(payload, ref offset, typeId, "ntext", true),
             0xA5 => ReadVariableType(payload, ref offset, typeId, "varbinary", false),
             0xA7 => ReadVariableType(payload, ref offset, typeId, "varchar", false),
             0xAD => ReadVariableType(payload, ref offset, typeId, "binary", false),
             0xAF => ReadVariableType(payload, ref offset, typeId, "char", false),
-            0xE7 => ReadVariableType(payload, ref offset, typeId, "nvarchar", true),
-            0xEF => ReadVariableType(payload, ref offset, typeId, "nchar", true),
+            TdsRpcTypeIds.NVarChar => ReadVariableType(payload, ref offset, typeId, "nvarchar", true),
+            TdsRpcTypeIds.NChar => ReadVariableType(payload, ref offset, typeId, "nchar", true),
             _ => throw new RpcParseException($"Unsupported RPC parameter type 0x{typeId:X2}.")
         };
     }
@@ -192,7 +192,7 @@ internal static class RpcRequestInspector
 
         byte[]? collation = null;
 
-        if (typeId is 0x23 or 0x63)
+        if (typeId is 0x23 or TdsRpcTypeIds.NText)
         {
             collation = ReadFixedBytes(payload, ref offset, 5);
         }
@@ -215,7 +215,7 @@ internal static class RpcRequestInspector
 
         byte[]? collation = null;
 
-        if (typeId is 0xA7 or 0xAF or 0xE7 or 0xEF)
+        if (typeId is 0xA7 or 0xAF or TdsRpcTypeIds.NVarChar or TdsRpcTypeIds.NChar)
         {
             collation = ReadFixedBytes(payload, ref offset, 5);
         }
@@ -233,16 +233,16 @@ internal static class RpcRequestInspector
     {
         return type.TypeId switch
         {
-            0x24 => ReadGuidValue(payload, ref offset),
-            0x26 or 0x68 or 0x6D or 0x6E or 0x6F => ReadNullableFixedValue(payload, ref offset, type),
-            0x30 or 0x32 or 0x34 or 0x38 or 0x3A or 0x3B or 0x3C or 0x3D or 0x3E or 0x7F => ReadFixedValue(payload, ref offset, type.FixedLength ?? 0, type.TypeId),
-            0x6A or 0x6C => ReadDecimalValue(payload, ref offset),
-            0x28 => ReadHexValue(payload, ref offset, 3),
-            0x29 => ReadHexValue(payload, ref offset, TdsDateTime2Helper.GetTimeValueLength(type.Scale ?? 0)),
-            0x2A => ReadDateTime2Value(payload, ref offset, type.Scale ?? 0),
-            0x2B => ReadHexValue(payload, ref offset, TdsDateTime2Helper.GetTimeValueLength(type.Scale ?? 0) + 5),
-            0x22 or 0x23 or 0x63 => ReadTextValue(payload, ref offset, type),
-            0xA5 or 0xA7 or 0xAD or 0xAF or 0xE7 or 0xEF => ReadVariableValue(payload, ref offset, type),
+            TdsRpcTypeIds.UniqueIdentifier => ReadGuidValue(payload, ref offset),
+            TdsRpcTypeIds.IntN or TdsRpcTypeIds.BitN or TdsRpcTypeIds.FloatN or TdsRpcTypeIds.MoneyN or TdsRpcTypeIds.DateTimeN => ReadNullableFixedValue(payload, ref offset, type),
+            TdsRpcTypeIds.TinyInt or TdsRpcTypeIds.Bit or TdsRpcTypeIds.SmallInt or TdsRpcTypeIds.Int or TdsRpcTypeIds.SmallDateTime or TdsRpcTypeIds.Real or TdsRpcTypeIds.Money or TdsRpcTypeIds.DateTime or TdsRpcTypeIds.Float or TdsRpcTypeIds.BigInt => ReadFixedValue(payload, ref offset, type.FixedLength ?? 0, type.TypeId),
+            TdsRpcTypeIds.DecimalN or TdsRpcTypeIds.NumericN => ReadDecimalValue(payload, ref offset),
+            TdsRpcTypeIds.Date => ReadHexValue(payload, ref offset, 3),
+            TdsRpcTypeIds.Time => ReadHexValue(payload, ref offset, TdsDateTime2Helper.GetTimeValueLength(type.Scale ?? 0)),
+            TdsRpcTypeIds.DateTime2 => ReadDateTime2Value(payload, ref offset, type.Scale ?? 0),
+            TdsRpcTypeIds.DateTimeOffset => ReadHexValue(payload, ref offset, TdsDateTime2Helper.GetTimeValueLength(type.Scale ?? 0) + 5),
+            0x22 or 0x23 or TdsRpcTypeIds.NText => ReadTextValue(payload, ref offset, type),
+            0xA5 or 0xA7 or 0xAD or 0xAF or TdsRpcTypeIds.NVarChar or TdsRpcTypeIds.NChar => ReadVariableValue(payload, ref offset, type),
             _ => throw new RpcParseException($"Unsupported RPC parameter value type 0x{type.TypeId:X2}.")
         };
     }
@@ -280,13 +280,13 @@ internal static class RpcRequestInspector
         var bytes = ReadFixedBytes(payload, ref offset, length);
         var value = typeId switch
         {
-            0x30 or 0x26 when length == 1 => bytes[0].ToString(),
-            0x32 or 0x68 when length == 1 => (bytes[0] != 0).ToString(),
-            0x34 or 0x26 when length == 2 => BinaryPrimitives.ReadInt16LittleEndian(bytes).ToString(),
-            0x38 or 0x26 when length == 4 => BinaryPrimitives.ReadInt32LittleEndian(bytes).ToString(),
-            0x7F or 0x26 when length == 8 => BinaryPrimitives.ReadInt64LittleEndian(bytes).ToString(),
-            0x3B or 0x6D when length == 4 => BitConverter.ToSingle(bytes).ToString("G"),
-            0x3E or 0x6D when length == 8 => BitConverter.ToDouble(bytes).ToString("G"),
+            TdsRpcTypeIds.TinyInt or TdsRpcTypeIds.IntN when length == 1 => bytes[0].ToString(),
+            TdsRpcTypeIds.Bit or TdsRpcTypeIds.BitN when length == 1 => (bytes[0] != 0).ToString(),
+            TdsRpcTypeIds.SmallInt or TdsRpcTypeIds.IntN when length == 2 => BinaryPrimitives.ReadInt16LittleEndian(bytes).ToString(),
+            TdsRpcTypeIds.Int or TdsRpcTypeIds.IntN when length == 4 => BinaryPrimitives.ReadInt32LittleEndian(bytes).ToString(),
+            TdsRpcTypeIds.BigInt or TdsRpcTypeIds.IntN when length == 8 => BinaryPrimitives.ReadInt64LittleEndian(bytes).ToString(),
+            TdsRpcTypeIds.Real or TdsRpcTypeIds.FloatN when length == 4 => BitConverter.ToSingle(bytes).ToString("G"),
+            TdsRpcTypeIds.Float or TdsRpcTypeIds.FloatN when length == 8 => BitConverter.ToDouble(bytes).ToString("G"),
             _ => $"0x{Convert.ToHexString(bytes)}"
         };
 
@@ -479,12 +479,6 @@ internal static class RpcRequestInspector
         offset += length;
 
         return bytes;
-    }
-
-    private static void Skip(byte[] payload, ref int offset, int length)
-    {
-        EnsureAvailable(payload, offset, length);
-        offset += length;
     }
 
     private static void EnsureAvailable(byte[] payload, int offset, int length)

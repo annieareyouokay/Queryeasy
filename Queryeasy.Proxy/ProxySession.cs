@@ -56,8 +56,8 @@ internal sealed class ProxySession
         await Task.WhenAny(clientToServer, serverToClient);
         await sessionCancellation.CancelAsync();
 
-        var clientToServerBytes = preLoginResult.ClientToServerBytes + await ObserveCopyResultAsync(clientToServer);
-        var serverToClientBytes = preLoginResult.ServerToClientBytes + await ObserveCopyResultAsync(serverToClient);
+        var clientToServerBytes = preLoginResult.ClientToServerBytes + await TaskObservation.IgnoreCancellationAsync(clientToServer);
+        var serverToClientBytes = preLoginResult.ServerToClientBytes + await TaskObservation.IgnoreCancellationAsync(serverToClient);
 
         _metrics.AddClientToSqlBytes(clientToServerBytes);
         _metrics.AddSqlToClientBytes(serverToClientBytes);
@@ -144,18 +144,6 @@ internal sealed class ProxySession
         {
             ProxyLog.Warn($"[{_sessionId}] Session idle timeout reached.");
             throw;
-        }
-    }
-
-    private static async Task<long> ObserveCopyResultAsync(Task<long> copyTask)
-    {
-        try
-        {
-            return await copyTask;
-        }
-        catch (OperationCanceledException)
-        {
-            return 0;
         }
     }
 }

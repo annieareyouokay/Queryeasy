@@ -206,11 +206,6 @@ internal sealed class SqlRewriter
 
     private static bool IsParameterNameMatch(string actual, string expected)
     {
-        return string.Equals(NormalizeParameterName(actual), NormalizeParameterName(expected), StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string NormalizeParameterName(string name)
-    {
-        return name.StartsWith('@') ? name[1..] : name;
+        return ParameterNameHelper.Equals(actual, expected);
     }
 }

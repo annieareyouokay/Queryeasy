@@ -185,15 +185,7 @@ internal sealed class TdsClientToServerPipeline
 
         if (rewriteResult.Error is not null)
         {
-            _metrics.RewriteFailed();
-            ProxyLog.Warn($"[{_sessionId}] SQL Batch rewrite failed: {rewriteResult.Error}");
-
-            if (_options.RewriteFailureBehavior == RewriteFailureBehavior.FailClosed)
-            {
-                throw new IOException(rewriteResult.Error);
-            }
-
-            return originalPackets;
+            return HandleRewriteFailure("SQL Batch rewrite", rewriteResult.Error, originalPackets);
         }
 
         if (!rewriteResult.Changed)
@@ -216,10 +208,8 @@ internal sealed class TdsClientToServerPipeline
         }
 
         var rewrittenPayload = SqlBatchExtractor.Encode(batch, rewriteResult.Sql);
-        var maxOriginalPayloadLength = Math.Max(1, originalPackets.Max(packet => packet.Payload.Length));
-
         _metrics.RewriteApplied();
-        return TdsPacketSplitter.SplitLike(firstPacket, rewrittenPayload, maxOriginalPayloadLength);
+        return SplitRewrittenPayload(firstPacket, originalPackets, rewrittenPayload);
     }
 
     private async Task<IReadOnlyList<TdsPacket>> ProcessRpcRequestMessageAsync(
@@ -288,15 +278,7 @@ internal sealed class TdsClientToServerPipeline
 
         if (rewriteResult.Error is not null)
         {
-            _metrics.RewriteFailed();
-            ProxyLog.Warn($"[{_sessionId}] RPC sp_executesql rewrite failed: {rewriteResult.Error}");
-
-            if (_options.RewriteFailureBehavior == RewriteFailureBehavior.FailClosed)
-            {
-                throw new IOException(rewriteResult.Error);
-            }
-
-            return originalPackets;
+            return HandleRewriteFailure("RPC sp_executesql rewrite", rewriteResult.Error, originalPackets);
         }
 
         if (!rewriteResult.Changed)
@@ -352,8 +334,32 @@ internal sealed class TdsClientToServerPipeline
             return originalPackets;
         }
 
-        var maxOriginalPayloadLength = Math.Max(1, originalPackets.Max(packet => packet.Payload.Length));
         _metrics.RewriteApplied();
+        return SplitRewrittenPayload(firstPacket, originalPackets, rewrittenPayload);
+    }
+
+    private IReadOnlyList<TdsPacket> HandleRewriteFailure(
+        string context,
+        string error,
+        IReadOnlyList<TdsPacket> originalPackets)
+    {
+        _metrics.RewriteFailed();
+        ProxyLog.Warn($"[{_sessionId}] {context} failed: {error}");
+
+        if (_options.RewriteFailureBehavior == RewriteFailureBehavior.FailClosed)
+        {
+            throw new IOException(error);
+        }
+
+        return originalPackets;
+    }
+
+    private static IReadOnlyList<TdsPacket> SplitRewrittenPayload(
+        TdsPacket firstPacket,
+        IReadOnlyList<TdsPacket> originalPackets,
+        byte[] rewrittenPayload)
+    {
+        var maxOriginalPayloadLength = Math.Max(1, originalPackets.Max(packet => packet.Payload.Length));
         return TdsPacketSplitter.SplitLike(firstPacket, rewrittenPayload, maxOriginalPayloadLength);
     }
 
