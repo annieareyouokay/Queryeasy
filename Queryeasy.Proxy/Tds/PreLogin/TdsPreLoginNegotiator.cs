@@ -74,7 +74,7 @@ internal sealed class TdsPreLoginNegotiator
         }
         catch (IOException ex)
         {
-            Console.WriteLine($"[{_sessionId}] PreLogin {side} parse failed: {ex.Message}. Forwarding unchanged.");
+            ProxyLog.Warn($"[{_sessionId}] PreLogin {side} parse failed: {ex.Message}. Forwarding unchanged.");
             return packet;
         }
 
@@ -91,7 +91,7 @@ internal sealed class TdsPreLoginNegotiator
 
         if (_options.LogPreLoginOptions)
         {
-            Console.WriteLine(
+            ProxyLog.Debug(
                 $"[{_sessionId}] PreLogin {side} ENCRYPTION: {FormatEncryption(before)} -> {FormatEncryption(after)} ({_options.PreLoginEncryptionMode}).");
         }
 

@@ -14,12 +14,14 @@ internal sealed class TdsClientToServerPipeline
     private readonly TdsPacketReader _reader;
     private readonly TdsPacketWriter _writer;
     private readonly SqlRewriter _rewriter;
+    private readonly ProxyMetrics _metrics;
 
     public TdsClientToServerPipeline(
         string sessionId,
         NetworkStream clientStream,
         NetworkStream targetStream,
-        ProxyOptions options)
+        ProxyOptions options,
+        ProxyMetrics metrics)
     {
         _sessionId = sessionId;
         _options = options;
@@ -28,6 +30,7 @@ internal sealed class TdsClientToServerPipeline
         _reader = new TdsPacketReader(clientStream);
         _writer = new TdsPacketWriter(targetStream);
         _rewriter = new SqlRewriter(options.RewriteRules);
+        _metrics = metrics;
     }
 
     public async Task<long> RunAsync(CancellationToken cancellationToken)
@@ -54,16 +57,17 @@ internal sealed class TdsClientToServerPipeline
 
                 if (_options.PreLoginEncryptionMode == PreLoginEncryptionMode.TryDisable)
                 {
-                    Console.WriteLine(
+                    ProxyLog.Warn(
                         $"[{_sessionId}] PreLogin TryDisable was applied, but raw TLS was still detected. SQL rewrite unavailable.");
                 }
 
+                _metrics.RawTlsFallback();
                 return totalBytesSent + await ForwardRawTlsStreamAsync(ex.InitialBytes, cancellationToken);
             }
 
             if (packet is null)
             {
-                Console.WriteLine($"[{_sessionId}] client -> sql closed by peer.");
+                ProxyLog.Debug($"[{_sessionId}] client -> sql closed by peer.");
                 break;
             }
 
@@ -88,7 +92,7 @@ internal sealed class TdsClientToServerPipeline
 
     private async Task<long> ForwardRawTlsStreamAsync(byte[] initialBytes, CancellationToken cancellationToken)
     {
-        Console.WriteLine(
+        ProxyLog.Warn(
             $"[{_sessionId}] Raw TLS stream detected; switching client -> sql to byte forwarding. SQL text is not visible in this session.");
 
         await _targetStream.WriteAsync(initialBytes, cancellationToken);
@@ -105,7 +109,7 @@ internal sealed class TdsClientToServerPipeline
 
                 if (bytesRead == 0)
                 {
-                    Console.WriteLine($"[{_sessionId}] client -> sql raw TLS stream closed by peer.");
+                    ProxyLog.Debug($"[{_sessionId}] client -> sql raw TLS stream closed by peer.");
                     break;
                 }
 
@@ -119,15 +123,15 @@ internal sealed class TdsClientToServerPipeline
         }
         catch (OperationCanceledException)
         {
-            Console.WriteLine($"[{_sessionId}] client -> sql raw TLS stream stopped after idle timeout.");
+            ProxyLog.Warn($"[{_sessionId}] client -> sql raw TLS stream stopped after idle timeout.");
         }
         catch (IOException ex)
         {
-            Console.WriteLine($"[{_sessionId}] client -> sql raw TLS I/O ended: {ex.Message}");
+            ProxyLog.Debug($"[{_sessionId}] client -> sql raw TLS I/O ended: {ex.Message}");
         }
         catch (SocketException ex)
         {
-            Console.WriteLine($"[{_sessionId}] client -> sql raw TLS socket ended: {ex.Message}");
+            ProxyLog.Debug($"[{_sessionId}] client -> sql raw TLS socket ended: {ex.Message}");
         }
         finally
         {
@@ -149,12 +153,28 @@ internal sealed class TdsClientToServerPipeline
         TdsPacket firstPacket,
         CancellationToken cancellationToken)
     {
-        var originalPackets = await ReadMessagePacketsAsync(firstPacket, cancellationToken);
+        _metrics.SqlBatchInspected();
+        var message = await ReadMessagePacketsAsync(firstPacket, cancellationToken);
+        var originalPackets = message.Packets;
+
+        if (message.IsOversized)
+        {
+            ProxyLog.Warn(
+                $"[{_sessionId}] SQL Batch skipped inspection because message payload exceeded {_options.MaxInspectableMessageBytes} bytes.");
+            return originalPackets;
+        }
+
         var payload = CombinePayloads(originalPackets);
         var batch = SqlBatchExtractor.Decode(payload);
         var sql = batch.Sql;
 
         LogSql("SQL Batch", sql);
+
+        if (IsSqlTooLargeForRewrite(sql))
+        {
+            ProxyLog.Warn($"[{_sessionId}] SQL Batch skipped rewrite because SQL text exceeded {_options.MaxRewriteSqlChars} chars.");
+            return originalPackets;
+        }
 
         if (_options.Mode is not (ProxyMode.DryRun or ProxyMode.Rewrite))
         {
@@ -165,14 +185,7 @@ internal sealed class TdsClientToServerPipeline
 
         if (rewriteResult.Error is not null)
         {
-            Console.WriteLine($"[{_sessionId}] SQL Batch rewrite failed: {rewriteResult.Error}");
-
-            if (_options.RewriteFailureBehavior == RewriteFailureBehavior.FailClosed)
-            {
-                throw new IOException(rewriteResult.Error);
-            }
-
-            return originalPackets;
+            return HandleRewriteFailure("SQL Batch rewrite", rewriteResult.Error, originalPackets);
         }
 
         if (!rewriteResult.Changed)
@@ -180,7 +193,8 @@ internal sealed class TdsClientToServerPipeline
             return originalPackets;
         }
 
-        Console.WriteLine($"[{_sessionId}] SQL Batch matched rewrite rule '{rewriteResult.RuleName}'.");
+        _metrics.RewriteMatched();
+        ProxyLog.Info($"[{_sessionId}] SQL Batch matched rewrite rule '{rewriteResult.RuleName}'.");
 
         if (_options.LogRewriteSqlText)
         {
@@ -189,40 +203,178 @@ internal sealed class TdsClientToServerPipeline
 
         if (_options.Mode == ProxyMode.DryRun)
         {
-            Console.WriteLine($"[{_sessionId}] DryRun enabled; forwarding original SQL Batch.");
+            ProxyLog.Info($"[{_sessionId}] DryRun enabled; forwarding original SQL Batch.");
             return originalPackets;
         }
 
         var rewrittenPayload = SqlBatchExtractor.Encode(batch, rewriteResult.Sql);
-        var maxOriginalPayloadLength = Math.Max(1, originalPackets.Max(packet => packet.Payload.Length));
-
-        return TdsPacketSplitter.SplitLike(firstPacket, rewrittenPayload, maxOriginalPayloadLength);
+        _metrics.RewriteApplied();
+        return SplitRewrittenPayload(firstPacket, originalPackets, rewrittenPayload);
     }
 
     private async Task<IReadOnlyList<TdsPacket>> ProcessRpcRequestMessageAsync(
         TdsPacket firstPacket,
         CancellationToken cancellationToken)
     {
-        var originalPackets = await ReadMessagePacketsAsync(firstPacket, cancellationToken);
+        _metrics.RpcInspected();
+        var message = await ReadMessagePacketsAsync(firstPacket, cancellationToken);
+        var originalPackets = message.Packets;
+
+        if (message.IsOversized)
+        {
+            ProxyLog.Warn(
+                $"[{_sessionId}] RPC Request skipped inspection because message payload exceeded {_options.MaxInspectableMessageBytes} bytes.");
+            return originalPackets;
+        }
+
         var payload = CombinePayloads(originalPackets);
         var inspectionResult = RpcRequestInspector.Inspect(payload);
 
-        Console.WriteLine(
-            $"[{_sessionId}] RPC Request inspected. sp_executesql candidate: {inspectionResult.ContainsSpExecuteSql}.");
+        ProxyLog.Debug(
+            $"[{_sessionId}] RPC Request inspected. Procedure: {FormatEmpty(inspectionResult.ProcedureName)}, sp_executesql: {inspectionResult.ContainsSpExecuteSql}.");
+
+        if (inspectionResult.ParseWarning is not null)
+        {
+            _metrics.ParseWarning();
+            ProxyLog.Warn($"[{_sessionId}] RPC parse warning: {inspectionResult.ParseWarning}");
+        }
 
         if (_options.LogSqlText && inspectionResult.ContainsSpExecuteSql)
         {
-            LogSql("RPC Unicode preview", inspectionResult.UnicodePreview);
+            LogSql("RPC sp_executesql stmt", inspectionResult.Statement ?? "<null>");
+
+            if (!string.IsNullOrEmpty(inspectionResult.ParameterDeclaration))
+            {
+                LogSql("RPC sp_executesql params", inspectionResult.ParameterDeclaration);
+            }
+
+            foreach (var parameter in inspectionResult.Parameters.Skip(2))
+            {
+                LogSql(
+                    $"RPC sp_executesql value {FormatEmpty(parameter.Name)} {parameter.TypeName}",
+                    parameter.Value ?? "<null>");
+            }
+        }
+
+        if (_options.Mode is not (ProxyMode.DryRun or ProxyMode.Rewrite)
+            || !inspectionResult.ContainsSpExecuteSql
+            || inspectionResult.SpExecuteSqlRequest is null)
+        {
+            return originalPackets;
+        }
+
+        if (IsSqlTooLargeForRewrite(inspectionResult.SpExecuteSqlRequest.Statement))
+        {
+            ProxyLog.Warn($"[{_sessionId}] RPC sp_executesql skipped rewrite because SQL text exceeded {_options.MaxRewriteSqlChars} chars.");
+            return originalPackets;
+        }
+
+        var rewriteResult = _rewriter.Rewrite(
+            inspectionResult.SpExecuteSqlRequest.Statement,
+            QueryRewriteScope.RpcSpExecuteSql,
+            SpExecuteSqlParameterHelper.GetLogicalParameterNames(
+                inspectionResult.SpExecuteSqlRequest.ParameterDeclaration,
+                inspectionResult.SpExecuteSqlRequest.SqlParameters));
+
+        if (rewriteResult.Error is not null)
+        {
+            return HandleRewriteFailure("RPC sp_executesql rewrite", rewriteResult.Error, originalPackets);
+        }
+
+        if (!rewriteResult.Changed)
+        {
+            return originalPackets;
+        }
+
+        _metrics.RewriteMatched();
+        ProxyLog.Info(
+            $"[{_sessionId}] RPC sp_executesql matched rewrite rule(s): {string.Join(", ", rewriteResult.RuleNames)}.");
+
+        if (_options.LogRewriteSqlText)
+        {
+            LogSql("RPC sp_executesql rewritten stmt", rewriteResult.Sql);
+
+            foreach (var parameterChange in rewriteResult.ParameterChanges)
+            {
+                var changeDescription = parameterChange.SqlType is not null
+                    ? $"type -> {parameterChange.SqlType}"
+                    : "value changed";
+
+                ProxyLog.Info(
+                    $"[{_sessionId}] RPC sp_executesql parameter rewrite '{parameterChange.Name}' ({changeDescription}) by rule '{parameterChange.RuleName}'.");
+            }
+        }
+
+        if (_options.Mode == ProxyMode.DryRun)
+        {
+            ProxyLog.Info($"[{_sessionId}] DryRun enabled; forwarding original RPC sp_executesql.");
+            return originalPackets;
+        }
+
+        byte[] rewrittenPayload;
+
+        try
+        {
+            rewrittenPayload = RpcSpExecuteSqlEncoder.Encode(
+                inspectionResult.SpExecuteSqlRequest,
+                rewriteResult.Sql,
+                rewriteResult.ParameterChanges);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or OverflowException or FormatException)
+        {
+            _metrics.EncodeFailed();
+            var error = $"RPC sp_executesql encode failed: {ex.Message}";
+            ProxyLog.Warn($"[{_sessionId}] {error}");
+
+            if (_options.RewriteFailureBehavior == RewriteFailureBehavior.FailClosed)
+            {
+                throw new IOException(error, ex);
+            }
+
+            return originalPackets;
+        }
+
+        _metrics.RewriteApplied();
+        return SplitRewrittenPayload(firstPacket, originalPackets, rewrittenPayload);
+    }
+
+    private IReadOnlyList<TdsPacket> HandleRewriteFailure(
+        string context,
+        string error,
+        IReadOnlyList<TdsPacket> originalPackets)
+    {
+        _metrics.RewriteFailed();
+        ProxyLog.Warn($"[{_sessionId}] {context} failed: {error}");
+
+        if (_options.RewriteFailureBehavior == RewriteFailureBehavior.FailClosed)
+        {
+            throw new IOException(error);
         }
 
         return originalPackets;
     }
 
-    private async Task<IReadOnlyList<TdsPacket>> ReadMessagePacketsAsync(
+    private static IReadOnlyList<TdsPacket> SplitRewrittenPayload(
+        TdsPacket firstPacket,
+        IReadOnlyList<TdsPacket> originalPackets,
+        byte[] rewrittenPayload)
+    {
+        var maxOriginalPayloadLength = Math.Max(1, originalPackets.Max(packet => packet.Payload.Length));
+        return TdsPacketSplitter.SplitLike(firstPacket, rewrittenPayload, maxOriginalPayloadLength);
+    }
+
+    private async Task<TdsMessageReadResult> ReadMessagePacketsAsync(
         TdsPacket firstPacket,
         CancellationToken cancellationToken)
     {
         var packets = new List<TdsPacket> { firstPacket };
+        var totalPayloadBytes = firstPacket.Payload.Length;
+        var isOversized = totalPayloadBytes > _options.MaxInspectableMessageBytes;
+
+        if (isOversized)
+        {
+            _metrics.OversizedMessage();
+        }
 
         while (!packets[^1].IsEndOfMessage)
         {
@@ -230,9 +382,16 @@ internal sealed class TdsClientToServerPipeline
                 ?? throw new IOException("TDS message ended before EndOfMessage packet.");
 
             packets.Add(nextPacket);
+            totalPayloadBytes += nextPacket.Payload.Length;
+
+            if (!isOversized && totalPayloadBytes > _options.MaxInspectableMessageBytes)
+            {
+                _metrics.OversizedMessage();
+                isOversized = true;
+            }
         }
 
-        return packets;
+        return new TdsMessageReadResult(packets, isOversized);
     }
 
     private async Task<TdsPacket?> ReadPacketWithIdleTimeoutAsync(CancellationToken cancellationToken)
@@ -246,7 +405,7 @@ internal sealed class TdsClientToServerPipeline
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            Console.WriteLine($"[{_sessionId}] client -> sql stopped after idle timeout.");
+            ProxyLog.Warn($"[{_sessionId}] client -> sql stopped after idle timeout.");
             throw;
         }
     }
@@ -255,12 +414,12 @@ internal sealed class TdsClientToServerPipeline
     {
         var packetType = packet.KnownType?.ToString() ?? $"Unknown 0x{packet.Type:X2}";
 
-        Console.WriteLine(
+        ProxyLog.Debug(
             $"[{_sessionId}] {direction} TDS {packetType}, status=0x{packet.Status:X2}, length={packet.Length}, packetId={packet.PacketId}.");
 
         if (_options.LogPayloadPreview && _options.PayloadPreviewBytes > 0)
         {
-            Console.WriteLine($"[{_sessionId}] {direction} payload preview: {BuildPayloadPreview(packet.Payload)}");
+            ProxyLog.Trace($"[{_sessionId}] {direction} payload preview: {BuildPayloadPreview(packet.Payload)}");
         }
     }
 
@@ -271,7 +430,7 @@ internal sealed class TdsClientToServerPipeline
             return;
         }
 
-        Console.WriteLine($"[{_sessionId}] {label}: {TrimForLog(sql)}");
+        ProxyLog.Debug($"[{_sessionId}] {label}: {TrimForLog(sql)}");
     }
 
     private string BuildPayloadPreview(byte[] payload)
@@ -297,8 +456,20 @@ internal sealed class TdsClientToServerPipeline
             : normalized;
     }
 
+    private bool IsSqlTooLargeForRewrite(string sql)
+    {
+        return _options.MaxRewriteSqlChars > 0 && sql.Length > _options.MaxRewriteSqlChars;
+    }
+
+    private static string FormatEmpty(string value)
+    {
+        return string.IsNullOrEmpty(value) ? "<empty>" : value;
+    }
+
     private static byte[] CombinePayloads(IEnumerable<TdsPacket> packets)
     {
         return packets.SelectMany(packet => packet.Payload).ToArray();
     }
+
+    private sealed record TdsMessageReadResult(IReadOnlyList<TdsPacket> Packets, bool IsOversized);
 }

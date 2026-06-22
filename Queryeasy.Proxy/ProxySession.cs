@@ -10,12 +10,14 @@ internal sealed class ProxySession
     private readonly string _sessionId;
     private readonly TcpClient _client;
     private readonly ProxyOptions _options;
+    private readonly ProxyMetrics _metrics;
 
-    public ProxySession(string sessionId, TcpClient client, ProxyOptions options)
+    public ProxySession(string sessionId, TcpClient client, ProxyOptions options, ProxyMetrics metrics)
     {
         _sessionId = sessionId;
         _client = client;
         _options = options;
+        _metrics = metrics;
     }
 
     public async Task RunAsync(CancellationToken serverCancellationToken)
@@ -40,7 +42,8 @@ internal sealed class ProxySession
             _sessionId,
             clientStream,
             targetStream,
-            _options);
+            _options,
+            _metrics);
 
         var clientToServer = clientToServerPipeline.RunAsync(sessionCancellation.Token);
 
@@ -53,10 +56,13 @@ internal sealed class ProxySession
         await Task.WhenAny(clientToServer, serverToClient);
         await sessionCancellation.CancelAsync();
 
-        var clientToServerBytes = preLoginResult.ClientToServerBytes + await ObserveCopyResultAsync(clientToServer);
-        var serverToClientBytes = preLoginResult.ServerToClientBytes + await ObserveCopyResultAsync(serverToClient);
+        var clientToServerBytes = preLoginResult.ClientToServerBytes + await TaskObservation.IgnoreCancellationAsync(clientToServer);
+        var serverToClientBytes = preLoginResult.ServerToClientBytes + await TaskObservation.IgnoreCancellationAsync(serverToClient);
 
-        Console.WriteLine(
+        _metrics.AddClientToSqlBytes(clientToServerBytes);
+        _metrics.AddSqlToClientBytes(serverToClientBytes);
+
+        ProxyLog.Info(
             $"[{_sessionId}] Session closed. Sent {clientToServerBytes} bytes to SQL Server, received {serverToClientBytes} bytes.");
     }
 
@@ -65,11 +71,11 @@ internal sealed class ProxySession
         using var connectCancellation = CancellationTokenSource.CreateLinkedTokenSource(serverCancellationToken);
         connectCancellation.CancelAfter(_options.ConnectTimeout);
 
-        Console.WriteLine($"[{_sessionId}] Connecting to SQL Server {_options.TargetHost}:{_options.TargetPort}.");
+        ProxyLog.Info($"[{_sessionId}] Connecting to SQL Server {_options.TargetHost}:{_options.TargetPort}.");
 
         await target.ConnectAsync(_options.TargetHost, _options.TargetPort, connectCancellation.Token);
 
-        Console.WriteLine($"[{_sessionId}] Connected to SQL Server.");
+        ProxyLog.Info($"[{_sessionId}] Connected to SQL Server.");
     }
 
     private async Task<long> CopyUntilClosedAsync(
@@ -89,7 +95,7 @@ internal sealed class ProxySession
 
                 if (bytesRead == 0)
                 {
-                    Console.WriteLine($"[{_sessionId}] {direction} closed by peer.");
+                    ProxyLog.Debug($"[{_sessionId}] {direction} closed by peer.");
                     break;
                 }
 
@@ -104,15 +110,15 @@ internal sealed class ProxySession
         }
         catch (OperationCanceledException)
         {
-            Console.WriteLine($"[{_sessionId}] {direction} stopped after idle timeout.");
+            ProxyLog.Warn($"[{_sessionId}] {direction} stopped after idle timeout.");
         }
         catch (IOException ex)
         {
-            Console.WriteLine($"[{_sessionId}] {direction} I/O ended: {ex.Message}");
+            ProxyLog.Debug($"[{_sessionId}] {direction} I/O ended: {ex.Message}");
         }
         catch (SocketException ex)
         {
-            Console.WriteLine($"[{_sessionId}] {direction} socket ended: {ex.Message}");
+            ProxyLog.Debug($"[{_sessionId}] {direction} socket ended: {ex.Message}");
         }
         finally
         {
@@ -136,20 +142,8 @@ internal sealed class ProxySession
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            Console.WriteLine($"[{_sessionId}] Session idle timeout reached.");
+            ProxyLog.Warn($"[{_sessionId}] Session idle timeout reached.");
             throw;
-        }
-    }
-
-    private static async Task<long> ObserveCopyResultAsync(Task<long> copyTask)
-    {
-        try
-        {
-            return await copyTask;
-        }
-        catch (OperationCanceledException)
-        {
-            return 0;
         }
     }
 }

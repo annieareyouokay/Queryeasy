@@ -1,12 +1,10 @@
 using Queryeasy.Proxy;
 
-var configPath = args.Length > 0
-    ? args[0]
-    : File.Exists("appsettings.json")
-        ? "appsettings.json"
-        : Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+var configPath = ResolveConfigPath(args);
 var options = ProxyOptions.Load(configPath);
 options.Validate();
+ProxyLog.Configure(options.LogLevel);
+var metrics = new ProxyMetrics();
 
 using var shutdown = new CancellationTokenSource();
 
@@ -16,7 +14,7 @@ Console.CancelKeyPress += (_, eventArgs) =>
     shutdown.Cancel();
 };
 
-var server = new SqlProxyServer(options);
+var server = new SqlProxyServer(options, metrics);
 
 try
 {
@@ -24,5 +22,17 @@ try
 }
 catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
 {
-    Console.WriteLine("Proxy stopped.");
+    ProxyLog.Info("Proxy stopped.");
+}
+
+static string ResolveConfigPath(string[] args)
+{
+    if (args.Length > 0)
+    {
+        return args[0];
+    }
+
+    return File.Exists("appsettings.json")
+        ? "appsettings.json"
+        : Path.Combine(AppContext.BaseDirectory, "appsettings.json");
 }
