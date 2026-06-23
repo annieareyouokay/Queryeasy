@@ -56,6 +56,8 @@ internal sealed record ProxyOptions
 
     public int MetricsSummaryIntervalSeconds { get; init; } = 30;
 
+    public bool AsyncLogging { get; init; } = true;
+
     public List<SqlRewriteRule> RewriteRules { get; init; } = [];
 
     public TimeSpan ConnectTimeout => TimeSpan.FromSeconds(ConnectTimeoutSeconds);
@@ -155,6 +157,46 @@ internal sealed record ProxyOptions
         ValidateRewriteRules();
     }
 
+    public InspectionCapabilities GetInspectionCapabilities()
+    {
+        if (Mode == ProxyMode.ForwardOnly)
+        {
+            return new InspectionCapabilities(
+                IsForwardOnly: true,
+                InspectSqlBatch: false,
+                InspectRpc: false,
+                RewriteSqlBatch: false,
+                RewriteRpc: false,
+                LogSqlText: LogSqlText);
+        }
+
+        var rewriteSqlBatch = Mode is ProxyMode.DryRun or ProxyMode.Rewrite
+            && RewriteRules.Any(rule => rule.Enabled && AppliesToSqlBatch(rule.Scope));
+        var rewriteRpc = Mode is ProxyMode.DryRun or ProxyMode.Rewrite
+            && RewriteRules.Any(rule => rule.Enabled && AppliesToRpc(rule.Scope));
+
+        var inspectSqlBatch = LogSqlText || rewriteSqlBatch || Mode == ProxyMode.InspectOnly;
+        var inspectRpc = LogSqlText || rewriteRpc || Mode == ProxyMode.InspectOnly;
+
+        return new InspectionCapabilities(
+            IsForwardOnly: false,
+            InspectSqlBatch: inspectSqlBatch,
+            InspectRpc: inspectRpc,
+            RewriteSqlBatch: rewriteSqlBatch,
+            RewriteRpc: rewriteRpc,
+            LogSqlText: LogSqlText);
+    }
+
+    private static bool AppliesToSqlBatch(QueryRewriteScope scope)
+    {
+        return scope is QueryRewriteScope.Any or QueryRewriteScope.SqlBatch;
+    }
+
+    private static bool AppliesToRpc(QueryRewriteScope scope)
+    {
+        return scope is QueryRewriteScope.Any or QueryRewriteScope.RpcSpExecuteSql;
+    }
+
     private void ValidateRewriteRules()
     {
         foreach (var rule in RewriteRules.Where(rule => rule.Enabled))
@@ -176,6 +218,8 @@ internal sealed record ProxyOptions
                 ValidateRewriteAction(rule, action);
             }
         }
+
+        _ = new SqlRewriter(RewriteRules);
     }
 
     private static void ValidateRewriteCondition(SqlRewriteRule rule)

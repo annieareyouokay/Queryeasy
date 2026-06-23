@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using Queryeasy.Proxy.Rewrite;
 
 namespace Queryeasy.Proxy;
 
@@ -7,12 +8,16 @@ internal sealed class SqlProxyServer
 {
     private readonly ProxyOptions _options;
     private readonly ProxyMetrics _metrics;
+    private readonly InspectionCapabilities _capabilities;
+    private readonly SqlRewriter _rewriter;
     private readonly SemaphoreSlim _sessionSlots;
 
     public SqlProxyServer(ProxyOptions options, ProxyMetrics metrics)
     {
         _options = options;
         _metrics = metrics;
+        _capabilities = options.GetInspectionCapabilities();
+        _rewriter = new SqlRewriter(options.RewriteRules);
         _sessionSlots = new SemaphoreSlim(options.MaxConcurrentSessions, options.MaxConcurrentSessions);
     }
 
@@ -49,6 +54,7 @@ internal sealed class SqlProxyServer
             listener.Stop();
             await metricsCancellation.CancelAsync();
             await TaskObservation.IgnoreCancellationAsync(metricsSummary);
+            await ProxyLog.ShutdownAsync();
         }
     }
 
@@ -91,7 +97,7 @@ internal sealed class SqlProxyServer
 
         try
         {
-            var session = new ProxySession(sessionId, client, _options, _metrics);
+            var session = new ProxySession(sessionId, client, _options, _capabilities, _rewriter, _metrics);
             await session.RunAsync(serverCancellationToken);
         }
         catch (OperationCanceledException) when (serverCancellationToken.IsCancellationRequested)

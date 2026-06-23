@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Net.Sockets;
+using Queryeasy.Proxy.Rewrite;
 using Queryeasy.Proxy.Tds;
 using Queryeasy.Proxy.Tds.PreLogin;
 
@@ -10,13 +11,23 @@ internal sealed class ProxySession
     private readonly string _sessionId;
     private readonly TcpClient _client;
     private readonly ProxyOptions _options;
+    private readonly InspectionCapabilities _capabilities;
+    private readonly SqlRewriter _rewriter;
     private readonly ProxyMetrics _metrics;
 
-    public ProxySession(string sessionId, TcpClient client, ProxyOptions options, ProxyMetrics metrics)
+    public ProxySession(
+        string sessionId,
+        TcpClient client,
+        ProxyOptions options,
+        InspectionCapabilities capabilities,
+        SqlRewriter rewriter,
+        ProxyMetrics metrics)
     {
         _sessionId = sessionId;
         _client = client;
         _options = options;
+        _capabilities = capabilities;
+        _rewriter = rewriter;
         _metrics = metrics;
     }
 
@@ -43,6 +54,8 @@ internal sealed class ProxySession
             clientStream,
             targetStream,
             _options,
+            _capabilities,
+            _rewriter,
             _metrics);
 
         var clientToServer = clientToServerPipeline.RunAsync(sessionCancellation.Token);

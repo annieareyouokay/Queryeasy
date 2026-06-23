@@ -274,6 +274,124 @@ public class UnitTest1
     }
 
     [Fact]
+    public void InspectionCapabilities_ForwardOnlyDisablesInspection()
+    {
+        var options = new ProxyOptions { Mode = ProxyMode.ForwardOnly };
+
+        var capabilities = options.GetInspectionCapabilities();
+
+        Assert.True(capabilities.IsForwardOnly);
+        Assert.False(capabilities.InspectSqlBatch);
+        Assert.False(capabilities.InspectRpc);
+        Assert.False(capabilities.RewriteSqlBatch);
+        Assert.False(capabilities.RewriteRpc);
+    }
+
+    [Fact]
+    public void InspectionCapabilities_RewriteWithRpcOnlyRulesSkipsSqlBatchInspection()
+    {
+        var options = new ProxyOptions
+        {
+            Mode = ProxyMode.Rewrite,
+            LogSqlText = false,
+            RewriteRules =
+            [
+                new SqlRewriteRule
+                {
+                    Name = "RpcOnly",
+                    Scope = QueryRewriteScope.RpcSpExecuteSql,
+                    When = new SqlRewriteCondition { ParameterExists = "@P1" },
+                    Actions =
+                    [
+                        new SqlRewriteAction
+                        {
+                            Type = SqlRewriteActionType.SetParameterType,
+                            Name = "@P1",
+                            SqlType = "datetime2(0)"
+                        }
+                    ]
+                }
+            ]
+        };
+
+        var capabilities = options.GetInspectionCapabilities();
+
+        Assert.False(capabilities.InspectSqlBatch);
+        Assert.True(capabilities.InspectRpc);
+        Assert.False(capabilities.RewriteSqlBatch);
+        Assert.True(capabilities.RewriteRpc);
+    }
+
+    [Fact]
+    public void InspectionCapabilities_InspectOnlyAlwaysInspectsBothMessageTypes()
+    {
+        var options = new ProxyOptions
+        {
+            Mode = ProxyMode.InspectOnly,
+            LogSqlText = false
+        };
+
+        var capabilities = options.GetInspectionCapabilities();
+
+        Assert.True(capabilities.InspectSqlBatch);
+        Assert.True(capabilities.InspectRpc);
+        Assert.False(capabilities.RewriteSqlBatch);
+        Assert.False(capabilities.RewriteRpc);
+    }
+
+    [Fact]
+    public void SqlRewriter_RejectsInvalidParameterNameRegexAtStartup()
+    {
+        var exception = Assert.Throws<InvalidOperationException>(() => new SqlRewriter(
+        [
+            new SqlRewriteRule
+            {
+                Name = "BadRegex",
+                When = new SqlRewriteCondition
+                {
+                    ParameterNameRegex = "@P(["
+                },
+                Actions =
+                [
+                    new SqlRewriteAction
+                    {
+                        Type = SqlRewriteActionType.SetParameterType,
+                        Name = "@P1",
+                        SqlType = "datetime2(0)"
+                    }
+                ]
+            }
+        ]));
+
+        Assert.Contains("When.ParameterNameRegex", exception.Message);
+    }
+
+    [Fact]
+    public async Task TdsPacketWriter_FlushesOncePerMultiPacketWrite()
+    {
+        await using var stream = new FlushCountingStream();
+        var writer = new TdsPacketWriter(stream);
+        var packet = new TdsPacket((byte)TdsPacketType.SqlBatch, 0x01, 0, 1, 0, [0x01, 0x02]);
+
+        await writer.WriteAsync([packet, packet.WithPayload([0x03, 0x04], packetId: 2)], CancellationToken.None);
+
+        Assert.Equal(1, stream.FlushCount);
+    }
+
+    [Fact]
+    public void RpcRequestInspector_SkipsParameterParseWhenFullParseNotRequired()
+    {
+        var payload = new byte[] { 0xFF, 0xFF, 0x0A, 0x00, 0x00, 0x00 };
+
+        var result = RpcRequestInspector.Inspect(payload, requiresFullSpExecuteSqlParse: false);
+
+        Assert.True(result.ContainsSpExecuteSql);
+        Assert.Null(result.Statement);
+        Assert.Empty(result.Parameters);
+        Assert.Null(result.SpExecuteSqlRequest);
+    }
+
+    [Fact]
     public void RpcSpExecuteSqlEncoder_RewritesDateTime2ScaleAndParameterDeclaration()
     {
         var declaration = "@P1 datetime2(3)";
@@ -352,6 +470,17 @@ public class UnitTest1
 
         Assert.Contains("datetime2(0)", rewrittenText);
         Assert.True(ContainsSequence(rewritten, [TdsRpcTypeIds.DateTime2, 0x00, 0x06]));
+    }
+
+    private sealed class FlushCountingStream : MemoryStream
+    {
+        public int FlushCount { get; private set; }
+
+        public override Task FlushAsync(CancellationToken cancellationToken)
+        {
+            FlushCount++;
+            return Task.CompletedTask;
+        }
     }
 
     private static SqlRewriter CreateReference47DateTime2Rule()

@@ -188,18 +188,19 @@ JSON-поля десериализуются без учета регистра.
 | `MaxRewriteSqlChars` | `65536` | Максимальная длина SQL-текста, который можно передать в rewrite engine. `0` отключает лимит. |
 | `RejectWhenOverloaded` | `true` | Если session limit исчерпан, новое подключение закрывается сразу. Если `false`, accept loop ждет свободный слот. |
 | `MetricsSummaryIntervalSeconds` | `30` | Интервал summary-лога метрик. `0` отключает periodic summary. |
+| `AsyncLogging` | `true` | Писать логи через фоновый channel вместо синхронного `Console.WriteLine` под lock. |
 
 Проверка конфигурации выполняется при запуске. Порты должны быть в диапазоне `0..65535`, хосты не должны быть пустыми, таймауты должны быть больше нуля, `BufferSizeBytes` должен быть не меньше `4096`, `MaxConcurrentSessions` должен быть больше нуля, `MaxInspectableMessageBytes` должен быть не меньше размера TDS header, а числовые лимиты логов/метрик не должны быть отрицательными.
 
 ## Режимы работы
 
-### InspectOnly
-
-Встроенный режим по умолчанию. Прокси анализирует клиентский TDS-трафик и отправляет SQL Server исходные пакеты без изменений. Детальные TDS/SQL логи появятся только при достаточно подробном `LogLevel`.
-
 ### ForwardOnly
 
-Значение присутствует в enum `ProxyMode`, но в текущей реализации отдельной ветки для него нет. На практике оно ведет себя как режим без rewrite: SQL Batch не переписывается, пакеты пересылаются дальше после обработки pipeline.
+Минимальный overhead: прокси собирает multi-packet TDS message и пересылает его без decode SQL, без RPC inspect и без rewrite. Подходит для passthrough-сценариев и baseline benchmark.
+
+### InspectOnly
+
+Встроенный режим по умолчанию. Прокси декодирует SQL Batch и RPC (процедура, для `sp_executesql` — statement/params при необходимости) и отправляет на SQL Server исходные пакеты без изменений.
 
 ### DryRun
 
@@ -212,6 +213,18 @@ JSON-поля десериализуются без учета регистра.
 Прокси применяет включенные правила, которые реально изменили SQL Batch или RPC `sp_executesql`, пересобирает TDS-пакеты и отправляет на SQL Server измененный payload.
 
 Для RPC rewrite сейчас поддерживается `sp_executesql`: изменение SQL-текста, значения параметра и типа параметра. Для смены `datetime2(3)` на `datetime2(0)` обновляется и бинарное TDS type info, и строка объявления параметров `@params`.
+
+### Что парсится в каждом режиме
+
+При старте прокси вычисляет `InspectionCapabilities` по `Mode`, `LogSqlText` и `Scope` включенных rewrite rules:
+
+| Mode | SQL Batch decode | RPC inspect | Rewrite SQL Batch | Rewrite RPC |
+| --- | --- | --- | --- | --- |
+| `ForwardOnly` | нет | нет | нет | нет |
+| `InspectOnly` | да | да | нет | нет |
+| `DryRun` / `Rewrite` | если `LogSqlText` или есть rules для `SqlBatch`/`Any` | если `LogSqlText` или есть rules для `RpcSpExecuteSql`/`Any` | `DryRun`/`Rewrite` + rules | `DryRun`/`Rewrite` + rules |
+
+Пример production-конфига с правилами только для `RpcSpExecuteSql` и `LogSqlText: false`: SQL Batch пересылается без decode; RPC `sp_executesql` парсится для rewrite, остальные RPC — только заголовок процедуры.
 
 ## Поведение при ошибке rewrite
 
@@ -468,7 +481,6 @@ flowchart LR
 - RPC rewrite реализован только для `sp_executesql`. Другие RPC Request инспектируются и пересылаются без изменений.
 - SQL-текст виден только при plaintext TDS. Если начинается raw TLS, прокси не может декодировать или переписывать SQL.
 - В направлении `sql -> client` трафик копируется без инспекции и изменения.
-- `ForwardOnly` есть в enum, но не имеет отдельного специализированного пути выполнения.
 - В репозитории нет `.sln`; команды сборки должны ссылаться на `.csproj`.
 - Автоматические тесты покрывают ключевые helper/rewriter/encoder сценарии, но не заменяют end-to-end проверку с реальным SQL Server.
 - Альтернативные конфиги `appsettings.PassThrough.json` и `appsettings.RequirePlainText.json` не копируются в output автоматически.
@@ -558,6 +570,12 @@ dotnet run --project .\Queryeasy.Proxy\Queryeasy.Proxy.csproj -- .\Queryeasy.Pro
 
 Перед переключением на `Rewrite` прогоните правила в `DryRun` и проверьте метрики в summary-логах. Подробное SQL/payload логирование в production лучше включать только временно и точечно.
 
+Для минимального overhead в production:
+
+- `LogLevel: "Warn"` или `"Info"`, `LogSqlText: false`, `LogPayloadPreview: false`
+- rewrite rules только для нужного `Scope` (например, только `RpcSpExecuteSql`)
+- `AsyncLogging: true` (по умолчанию)
+
 ### Load harness
 
 В `tools/load-harness.ps1` есть простой PowerShell 7 сценарий для сравнения прямого подключения и подключения через прокси:
@@ -570,12 +588,29 @@ pwsh .\tools\load-harness.ps1 `
   -IterationsPerWorker 100
 ```
 
+По умолчанию harness открывает **новое подключение на каждый запрос** (`connection_mode=new_per_request`). Это нагружает login/handshake и сильнее бьёт по прокси, чем типичный клиент с пулом.
+
+Для сравнения, близкого к 1С с пулом соединений, используйте `-ReuseConnection`: одно подключение на воркер, login один раз, latency меряется только для `ExecuteScalar`:
+
+```powershell
+pwsh .\tools\load-harness.ps1 `
+  -ConnectionString "Server=127.0.0.1,11433;Database=testdb;User Id=sa;Password=...;TrustServerCertificate=true;Encrypt=false" `
+  -Query "SELECT T1._Description FROM dbo._Reference47 T1" `
+  -Concurrency 50 `
+  -IterationsPerWorker 100 `
+  -ReuseConnection
+```
+
+В выводе будет `connection_mode=reuse` или `connection_mode=new_per_request`.
+
 Сравните результаты для:
 
 - прямого подключения к SQL Server;
 - прокси в `ForwardOnly`;
 - прокси в `InspectOnly`;
 - прокси в `Rewrite`.
+
+Зафиксируйте `rps`, `latency_p50_ms`, `latency_p95_ms` до и после изменений конфигурации или кода. SQL Batch harness не проверяет RPC rewrite — для правил `RpcSpExecuteSql` нужен реальный клиент с `sp_executesql`.
 
 Так как тестовый проект появился, базовая автоматическая проверка:
 

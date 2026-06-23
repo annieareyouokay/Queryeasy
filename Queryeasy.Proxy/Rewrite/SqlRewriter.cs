@@ -4,11 +4,14 @@ namespace Queryeasy.Proxy.Rewrite;
 
 internal sealed class SqlRewriter
 {
-    private readonly IReadOnlyList<SqlRewriteRule> _rules;
+    private readonly IReadOnlyList<CompiledSqlRewriteRule> _rules;
 
     public SqlRewriter(IEnumerable<SqlRewriteRule> rules)
     {
-        _rules = rules.Where(rule => rule.Enabled).ToArray();
+        _rules = rules
+            .Where(rule => rule.Enabled)
+            .Select(CompiledSqlRewriteRule.Create)
+            .ToArray();
     }
 
     public RewriteResult Rewrite(string sql)
@@ -25,14 +28,16 @@ internal sealed class SqlRewriter
         var matchedRules = new List<string>();
         var parameterChanges = new List<RewriteParameterChange>();
 
-        foreach (var rule in _rules)
+        foreach (var compiledRule in _rules)
         {
+            var rule = compiledRule.Rule;
+
             if (!IsScopeMatch(rule, scope))
             {
                 continue;
             }
 
-            var conditionMatch = EvaluateCondition(rule, rewrittenSql, parameters);
+            var conditionMatch = EvaluateCondition(compiledRule, rewrittenSql, parameters);
             if (!conditionMatch.IsMatch)
             {
                 continue;
@@ -41,19 +46,18 @@ internal sealed class SqlRewriter
             try
             {
                 var ruleChanged = false;
-                var actions = GetActions(rule);
 
-                foreach (var action in actions)
+                foreach (var compiledAction in compiledRule.Actions)
                 {
-                    switch (action.Type)
+                    switch (compiledAction.Action.Type)
                     {
                         case SqlRewriteActionType.ReplaceSql:
-                            if (string.IsNullOrEmpty(action.Find))
+                            if (string.IsNullOrEmpty(compiledAction.Action.Find))
                             {
                                 break;
                             }
 
-                            var nextSql = ApplySqlAction(rewrittenSql, action);
+                            var nextSql = ApplySqlAction(rewrittenSql, compiledAction);
 
                             if (!string.Equals(rewrittenSql, nextSql, StringComparison.Ordinal))
                             {
@@ -64,16 +68,16 @@ internal sealed class SqlRewriter
                             break;
 
                         case SqlRewriteActionType.SetParameterValue:
-                            if (action.Value is null)
+                            if (compiledAction.Action.Value is null)
                             {
                                 break;
                             }
 
-                            foreach (var targetName in GetParameterActionTargets(action, conditionMatch.MatchedParameters))
+                            foreach (var targetName in GetParameterActionTargets(compiledAction.Action, conditionMatch.MatchedParameters))
                             {
                                 parameterChanges.Add(new RewriteParameterChange(
                                     targetName,
-                                    action.Value,
+                                    compiledAction.Action.Value,
                                     null,
                                     rule.Name));
                                 ruleChanged = true;
@@ -82,23 +86,23 @@ internal sealed class SqlRewriter
                             break;
 
                         case SqlRewriteActionType.SetParameterType:
-                            if (string.IsNullOrWhiteSpace(action.SqlType))
+                            if (string.IsNullOrWhiteSpace(compiledAction.Action.SqlType))
                             {
-                                var targetLabel = string.IsNullOrWhiteSpace(action.Name)
+                                var targetLabel = string.IsNullOrWhiteSpace(compiledAction.Action.Name)
                                     ? "matched parameters"
-                                    : action.Name;
+                                    : compiledAction.Action.Name;
 
                                 return RewriteResult.Failed(
                                     sql,
                                     $"Rule '{rule.Name}' action SetParameterType for '{targetLabel}' requires SqlType.");
                             }
 
-                            foreach (var targetName in GetParameterActionTargets(action, conditionMatch.MatchedParameters))
+                            foreach (var targetName in GetParameterActionTargets(compiledAction.Action, conditionMatch.MatchedParameters))
                             {
                                 parameterChanges.Add(new RewriteParameterChange(
                                     targetName,
                                     null,
-                                    action.SqlType,
+                                    compiledAction.Action.SqlType,
                                     rule.Name));
                                 ruleChanged = true;
                             }
@@ -112,7 +116,7 @@ internal sealed class SqlRewriter
                     matchedRules.Add(rule.Name);
                 }
             }
-            catch (Exception ex) when (ex is ArgumentException or RegexMatchTimeoutException)
+            catch (RegexMatchTimeoutException ex)
             {
                 return RewriteResult.Failed(sql, $"Rule '{rule.Name}' failed: {ex.Message}");
             }
@@ -129,11 +133,11 @@ internal sealed class SqlRewriter
     }
 
     private static ConditionMatchResult EvaluateCondition(
-        SqlRewriteRule rule,
+        CompiledSqlRewriteRule compiledRule,
         string sql,
         IReadOnlyList<RewriteParameterInfo> parameters)
     {
-        var condition = rule.When;
+        var condition = compiledRule.Rule.When;
         var comparison = condition.IgnoreCase
             ? StringComparison.OrdinalIgnoreCase
             : StringComparison.Ordinal;
@@ -144,23 +148,14 @@ internal sealed class SqlRewriter
             return ConditionMatchResult.NoMatch;
         }
 
-        if (!string.IsNullOrEmpty(condition.SqlRegex))
+        if (compiledRule.WhenSqlRegex is not null
+            && !compiledRule.WhenSqlRegex.IsMatch(sql))
         {
-            var options = RegexOptions.CultureInvariant;
-
-            if (condition.IgnoreCase)
-            {
-                options |= RegexOptions.IgnoreCase;
-            }
-
-            if (!Regex.IsMatch(sql, condition.SqlRegex, options, TimeSpan.FromSeconds(1)))
-            {
-                return ConditionMatchResult.NoMatch;
-            }
+            return ConditionMatchResult.NoMatch;
         }
 
         var hasParameterExists = !string.IsNullOrEmpty(condition.ParameterExists);
-        var hasParameterNameRegex = !string.IsNullOrEmpty(condition.ParameterNameRegex);
+        var hasParameterNameRegex = compiledRule.WhenParameterNameRegex is not null;
         var hasParameterType = !string.IsNullOrEmpty(condition.ParameterType);
         var hasParameterFilter = hasParameterExists || hasParameterNameRegex || hasParameterType;
 
@@ -170,7 +165,7 @@ internal sealed class SqlRewriter
         }
 
         var matchedParameters = parameters
-            .Where(parameter => MatchesParameterNameFilter(condition, parameter))
+            .Where(parameter => MatchesParameterNameFilter(compiledRule, condition, parameter))
             .Where(parameter => !hasParameterType || IsTypeMatch(parameter.TypeName, condition.ParameterType!))
             .ToArray();
 
@@ -179,37 +174,16 @@ internal sealed class SqlRewriter
             : ConditionMatchResult.NoMatch;
     }
 
-    private static IReadOnlyList<SqlRewriteAction> GetActions(SqlRewriteRule rule)
+    private static string ApplySqlAction(string sql, CompiledSqlRewriteAction compiledAction)
     {
-        if (rule.Actions.Count > 0)
-        {
-            return rule.Actions;
-        }
+        var action = compiledAction.Action;
 
-        if (string.IsNullOrEmpty(rule.Find))
-        {
-            return [];
-        }
-
-        return
-        [
-            new SqlRewriteAction
-            {
-                Type = SqlRewriteActionType.ReplaceSql,
-                MatchType = rule.MatchType,
-                Find = rule.Find,
-                Replace = rule.Replace,
-                IgnoreCase = rule.IgnoreCase
-            }
-        ];
-    }
-
-    private static string ApplySqlAction(string sql, SqlRewriteAction action)
-    {
         return action.MatchType switch
         {
             SqlRewriteMatchType.Contains => ApplyContainsRule(sql, action),
-            SqlRewriteMatchType.Regex => ApplyRegexRule(sql, action),
+            SqlRewriteMatchType.Regex when compiledAction.FindRegex is not null
+                => compiledAction.FindRegex.Replace(sql, action.Replace),
+            SqlRewriteMatchType.Regex => sql,
             _ => sql
         };
     }
@@ -223,22 +197,13 @@ internal sealed class SqlRewriter
         return sql.Replace(action.Find, action.Replace, comparison);
     }
 
-    private static string ApplyRegexRule(string sql, SqlRewriteAction action)
-    {
-        var options = RegexOptions.CultureInvariant;
-
-        if (action.IgnoreCase)
-        {
-            options |= RegexOptions.IgnoreCase;
-        }
-
-        return Regex.Replace(sql, action.Find, action.Replace, options, TimeSpan.FromSeconds(1));
-    }
-
-    private static bool MatchesParameterNameFilter(SqlRewriteCondition condition, RewriteParameterInfo parameter)
+    private static bool MatchesParameterNameFilter(
+        CompiledSqlRewriteRule compiledRule,
+        SqlRewriteCondition condition,
+        RewriteParameterInfo parameter)
     {
         var hasParameterExists = !string.IsNullOrEmpty(condition.ParameterExists);
-        var hasParameterNameRegex = !string.IsNullOrEmpty(condition.ParameterNameRegex);
+        var hasParameterNameRegex = compiledRule.WhenParameterNameRegex is not null;
 
         if (!hasParameterExists && !hasParameterNameRegex)
         {
@@ -252,14 +217,7 @@ internal sealed class SqlRewriter
 
         if (hasParameterNameRegex)
         {
-            var options = RegexOptions.CultureInvariant;
-
-            if (condition.IgnoreCase)
-            {
-                options |= RegexOptions.IgnoreCase;
-            }
-
-            return Regex.IsMatch(parameter.Name, condition.ParameterNameRegex!, options, TimeSpan.FromSeconds(1));
+            return compiledRule.WhenParameterNameRegex!.IsMatch(parameter.Name);
         }
 
         return false;

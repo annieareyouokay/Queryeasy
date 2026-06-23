@@ -3,7 +3,7 @@ using Queryeasy.Proxy;
 var configPath = ResolveConfigPath(args);
 var options = ProxyOptions.Load(configPath);
 options.Validate();
-ProxyLog.Configure(options.LogLevel);
+ProxyLog.Configure(options.LogLevel, options.AsyncLogging);
 var metrics = new ProxyMetrics();
 
 using var shutdown = new CancellationTokenSource();
@@ -23,6 +23,10 @@ try
 catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
 {
     ProxyLog.Info("Proxy stopped.");
+}
+finally
+{
+    await ProxyLog.ShutdownAsync();
 }
 
 static string ResolveConfigPath(string[] args)

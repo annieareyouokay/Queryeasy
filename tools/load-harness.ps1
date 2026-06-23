@@ -8,7 +8,9 @@ param(
 
     [int] $Concurrency = 16,
 
-    [int] $IterationsPerWorker = 100
+    [int] $IterationsPerWorker = 100,
+
+    [switch] $ReuseConnection
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,8 +26,41 @@ $started = [System.Diagnostics.Stopwatch]::StartNew()
     $connectionString = $using:ConnectionString
     $query = $using:Query
     $iterations = $using:IterationsPerWorker
+    $reuseConnection = $using:ReuseConnection
     $latencies = $using:latencies
     $errors = $using:errors
+
+    if ($reuseConnection) {
+        $connection = [System.Data.SqlClient.SqlConnection]::new($connectionString)
+        $command = $connection.CreateCommand()
+        $command.CommandText = $query
+
+        try {
+            $connection.Open()
+
+            for ($i = 0; $i -lt $iterations; $i++) {
+                $timer = [System.Diagnostics.Stopwatch]::StartNew()
+
+                try {
+                    [void] $command.ExecuteScalar()
+                    $timer.Stop()
+                    $latencies.Add($timer.Elapsed.TotalMilliseconds)
+                }
+                catch {
+                    $timer.Stop()
+                    $errors.Add($_.Exception.Message)
+                }
+            }
+        }
+        catch {
+            $errors.Add($_.Exception.Message)
+        }
+        finally {
+            $connection.Dispose()
+        }
+
+        return
+    }
 
     for ($i = 0; $i -lt $iterations; $i++) {
         $timer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -59,6 +94,9 @@ function Get-Percentile([double[]] $Values, [double] $Percentile) {
     return [Math]::Round($Values[$index], 2)
 }
 
+$connectionMode = if ($ReuseConnection) { "reuse" } else { "new_per_request" }
+
+Write-Host "connection_mode=$connectionMode"
 Write-Host "requests_total=$total"
 Write-Host "requests_ok=$($ordered.Count)"
 Write-Host "requests_failed=$($errors.Count)"

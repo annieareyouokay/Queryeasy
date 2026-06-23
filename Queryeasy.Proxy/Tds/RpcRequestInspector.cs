@@ -10,9 +10,14 @@ internal static class RpcRequestInspector
 
     public static RpcInspectionResult Inspect(byte[] payload)
     {
+        return Inspect(payload, requiresFullSpExecuteSqlParse: true);
+    }
+
+    public static RpcInspectionResult Inspect(byte[] payload, bool requiresFullSpExecuteSqlParse)
+    {
         try
         {
-            return InspectCore(payload);
+            return InspectCore(payload, requiresFullSpExecuteSqlParse);
         }
         catch (RpcParseException ex)
         {
@@ -20,7 +25,7 @@ internal static class RpcRequestInspector
         }
     }
 
-    private static RpcInspectionResult InspectCore(byte[] payload)
+    private static RpcInspectionResult InspectCore(byte[] payload, bool requiresFullSpExecuteSqlParse)
     {
         var offset = GetRpcBodyOffset(payload);
 
@@ -30,6 +35,20 @@ internal static class RpcRequestInspector
         }
 
         var procedure = ReadProcedure(payload, ref offset);
+        var isSpExecuteSql = IsSpExecuteSqlProcedure(procedure);
+
+        if (!requiresFullSpExecuteSqlParse || !isSpExecuteSql)
+        {
+            return new RpcInspectionResult(
+                isSpExecuteSql,
+                procedure.DisplayName,
+                null,
+                null,
+                [],
+                null,
+                null);
+        }
+
         var optionFlags = ReadUInt16(payload, ref offset);
         _ = optionFlags;
 
@@ -49,12 +68,9 @@ internal static class RpcRequestInspector
             }
         }
 
-        var isSpExecuteSql = procedure.ProcedureId == SpExecuteSqlProcedureId
-            || string.Equals(procedure.Name, "sp_executesql", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(procedure.Name, "sys.sp_executesql", StringComparison.OrdinalIgnoreCase);
-        var statement = isSpExecuteSql && parameters.Count > 0 ? parameters[0].Value : null;
-        var parameterDeclaration = isSpExecuteSql && parameters.Count > 1 ? parameters[1].Value : null;
-        var request = isSpExecuteSql && statement is not null
+        var statement = parameters.Count > 0 ? parameters[0].Value : null;
+        var parameterDeclaration = parameters.Count > 1 ? parameters[1].Value : null;
+        var request = statement is not null
             ? new RpcSpExecuteSqlRequest(payload, statement, parameterDeclaration, parameters)
             : null;
 
@@ -66,6 +82,13 @@ internal static class RpcRequestInspector
             parameters,
             request,
             parseWarning);
+    }
+
+    private static bool IsSpExecuteSqlProcedure(RpcProcedure procedure)
+    {
+        return procedure.ProcedureId == SpExecuteSqlProcedureId
+            || string.Equals(procedure.Name, "sp_executesql", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(procedure.Name, "sys.sp_executesql", StringComparison.OrdinalIgnoreCase);
     }
 
     private static int GetRpcBodyOffset(byte[] payload)

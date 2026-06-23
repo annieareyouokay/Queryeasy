@@ -9,6 +9,7 @@ internal sealed class TdsClientToServerPipeline
 {
     private readonly string _sessionId;
     private readonly ProxyOptions _options;
+    private readonly InspectionCapabilities _capabilities;
     private readonly NetworkStream _clientStream;
     private readonly NetworkStream _targetStream;
     private readonly TdsPacketReader _reader;
@@ -21,15 +22,18 @@ internal sealed class TdsClientToServerPipeline
         NetworkStream clientStream,
         NetworkStream targetStream,
         ProxyOptions options,
+        InspectionCapabilities capabilities,
+        SqlRewriter rewriter,
         ProxyMetrics metrics)
     {
         _sessionId = sessionId;
         _options = options;
+        _capabilities = capabilities;
         _clientStream = clientStream;
         _targetStream = targetStream;
         _reader = new TdsPacketReader(clientStream);
         _writer = new TdsPacketWriter(targetStream);
-        _rewriter = new SqlRewriter(options.RewriteRules);
+        _rewriter = rewriter;
         _metrics = metrics;
     }
 
@@ -71,12 +75,14 @@ internal sealed class TdsClientToServerPipeline
                 break;
             }
 
-            var packetsToForward = packet.KnownType switch
-            {
-                TdsPacketType.SqlBatch => await ProcessSqlBatchMessageAsync(packet, cancellationToken),
-                TdsPacketType.RpcRequest => await ProcessRpcRequestMessageAsync(packet, cancellationToken),
-                _ => [packet]
-            };
+            var packetsToForward = _capabilities.IsForwardOnly
+                ? await ForwardClientMessageAsync(packet, cancellationToken)
+                : packet.KnownType switch
+                {
+                    TdsPacketType.SqlBatch => await ProcessSqlBatchMessageAsync(packet, cancellationToken),
+                    TdsPacketType.RpcRequest => await ProcessRpcRequestMessageAsync(packet, cancellationToken),
+                    _ => [packet]
+                };
 
             foreach (var packetToForward in packetsToForward)
             {
@@ -149,11 +155,46 @@ internal sealed class TdsClientToServerPipeline
         return await _clientStream.ReadAsync(buffer.AsMemory(0, buffer.Length), idleCancellation.Token);
     }
 
+    private async Task<IReadOnlyList<TdsPacket>> ForwardClientMessageAsync(
+        TdsPacket firstPacket,
+        CancellationToken cancellationToken)
+    {
+        if (firstPacket.KnownType == TdsPacketType.SqlBatch)
+        {
+            _metrics.SqlBatchInspected();
+        }
+        else if (firstPacket.KnownType == TdsPacketType.RpcRequest)
+        {
+            _metrics.RpcInspected();
+        }
+
+        return await ForwardMessagePacketsAsync(firstPacket, cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<TdsPacket>> ForwardMessagePacketsAsync(
+        TdsPacket firstPacket,
+        CancellationToken cancellationToken)
+    {
+        if (firstPacket.IsEndOfMessage)
+        {
+            return [firstPacket];
+        }
+
+        var message = await ReadMessagePacketsAsync(firstPacket, cancellationToken);
+        return message.Packets;
+    }
+
     private async Task<IReadOnlyList<TdsPacket>> ProcessSqlBatchMessageAsync(
         TdsPacket firstPacket,
         CancellationToken cancellationToken)
     {
         _metrics.SqlBatchInspected();
+
+        if (!_capabilities.InspectSqlBatch)
+        {
+            return await ForwardMessagePacketsAsync(firstPacket, cancellationToken);
+        }
+
         var message = await ReadMessagePacketsAsync(firstPacket, cancellationToken);
         var originalPackets = message.Packets;
 
@@ -176,7 +217,8 @@ internal sealed class TdsClientToServerPipeline
             return originalPackets;
         }
 
-        if (_options.Mode is not (ProxyMode.DryRun or ProxyMode.Rewrite))
+        if (_options.Mode is not (ProxyMode.DryRun or ProxyMode.Rewrite)
+            || !_capabilities.RewriteSqlBatch)
         {
             return originalPackets;
         }
@@ -217,6 +259,12 @@ internal sealed class TdsClientToServerPipeline
         CancellationToken cancellationToken)
     {
         _metrics.RpcInspected();
+
+        if (!_capabilities.InspectRpc)
+        {
+            return await ForwardMessagePacketsAsync(firstPacket, cancellationToken);
+        }
+
         var message = await ReadMessagePacketsAsync(firstPacket, cancellationToken);
         var originalPackets = message.Packets;
 
@@ -228,7 +276,8 @@ internal sealed class TdsClientToServerPipeline
         }
 
         var payload = CombinePayloads(originalPackets);
-        var inspectionResult = RpcRequestInspector.Inspect(payload);
+        var requiresFullSpExecuteSqlParse = _capabilities.RewriteRpc || _capabilities.LogSqlText;
+        var inspectionResult = RpcRequestInspector.Inspect(payload, requiresFullSpExecuteSqlParse);
 
         ProxyLog.Debug(
             $"[{_sessionId}] RPC Request inspected. Procedure: {FormatEmpty(inspectionResult.ProcedureName)}, sp_executesql: {inspectionResult.ContainsSpExecuteSql}.");
@@ -257,6 +306,7 @@ internal sealed class TdsClientToServerPipeline
         }
 
         if (_options.Mode is not (ProxyMode.DryRun or ProxyMode.Rewrite)
+            || !_capabilities.RewriteRpc
             || !inspectionResult.ContainsSpExecuteSql
             || inspectionResult.SpExecuteSqlRequest is null)
         {
