@@ -36,6 +36,12 @@ artifacts/
 *.nupkg
 *.snupkg
 
+# dotnet publish
+publish/
+.publish*/
+**/bin/**/publish/
+PublishProfiles/*.pubxml.user
+
 # Logs and diagnostics
 *.log
 *.tlog
