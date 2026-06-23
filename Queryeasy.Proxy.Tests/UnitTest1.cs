@@ -1,6 +1,7 @@
 ﻿using Queryeasy.Proxy;
 using Queryeasy.Proxy.Rewrite;
 using Queryeasy.Proxy.Tds;
+using System.Diagnostics;
 using System.Text;
 
 namespace Queryeasy.Proxy.Tests;
@@ -470,6 +471,47 @@ public class UnitTest1
 
         Assert.Contains("datetime2(0)", rewrittenText);
         Assert.True(ContainsSequence(rewritten, [TdsRpcTypeIds.DateTime2, 0x00, 0x06]));
+    }
+
+    [Fact]
+    public void ProxyPerformanceMetrics_RecordsCountTotalAvgMax()
+    {
+        var metrics = new ProxyPerformanceMetrics();
+
+        metrics.Record(ProxyPerformanceStage.C2sReadPacket, Stopwatch.Frequency / 10);
+        metrics.Record(ProxyPerformanceStage.C2sReadPacket, Stopwatch.Frequency / 5);
+
+        var summary = metrics.BuildSummary();
+
+        Assert.Contains("C2sReadPacket=2/", summary);
+        Assert.Contains("/avg", summary);
+        Assert.Contains("/max", summary);
+    }
+
+    [Fact]
+    public void SessionPerformanceTracker_MergesIntoGlobal()
+    {
+        var metrics = new ProxyPerformanceMetrics();
+        var session = metrics.CreateSessionTracker();
+
+        session.Record(ProxyPerformanceStage.SessionConnect, Stopwatch.Frequency / 20);
+        session.Complete();
+
+        var summary = metrics.BuildSummary();
+
+        Assert.Contains("SessionConnect=1/", summary);
+    }
+
+    [Fact]
+    public void NoOpPerformanceRecorder_HasNoSideEffects()
+    {
+        var recorder = NoOpPerformanceRecorder.Instance;
+
+        using (recorder.Measure(ProxyPerformanceStage.C2sWritePackets))
+        {
+        }
+
+        recorder.Record(ProxyPerformanceStage.C2sWritePackets, Stopwatch.Frequency);
     }
 
     private sealed class FlushCountingStream : MemoryStream

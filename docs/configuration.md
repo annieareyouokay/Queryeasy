@@ -34,7 +34,8 @@
     "MaxRewriteSqlChars": 65536,
     "RejectWhenOverloaded": true,
     "MetricsSummaryIntervalSeconds": 30,
-    "AsyncLogging": true
+    "AsyncLogging": true,
+    "EnablePerformanceMetrics": false
   },
   "RewriteRules": []
 }
@@ -93,8 +94,7 @@ JSON-поля десериализуются без учёта регистра.
 | `RejectWhenOverloaded` | `true` | При исчерпании лимита сессий — сразу закрыть новое подключение. Если `false` — ждать слот. |
 | `MetricsSummaryIntervalSeconds` | `30` | Интервал summary-лога метрик. `0` отключает. |
 | `AsyncLogging` | `true` | Логи через фоновый channel вместо синхронного вывода. |
-
-## Валидация при запуске
+| `EnablePerformanceMetrics` | `false` | Wall-clock замеры по этапам пайплайна. См. [logging-and-metrics.md](logging-and-metrics.md). |
 
 Проверяется ([ProxyOptions.Validate](../Queryeasy.Proxy/ProxyOptions.cs)):
 

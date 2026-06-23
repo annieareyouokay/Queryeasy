@@ -8,14 +8,16 @@ internal sealed class SqlProxyServer
 {
     private readonly ProxyOptions _options;
     private readonly ProxyMetrics _metrics;
+    private readonly ProxyPerformanceMetrics _performanceMetrics;
     private readonly InspectionCapabilities _capabilities;
     private readonly SqlRewriter _rewriter;
     private readonly SemaphoreSlim _sessionSlots;
 
-    public SqlProxyServer(ProxyOptions options, ProxyMetrics metrics)
+    public SqlProxyServer(ProxyOptions options, ProxyMetrics metrics, ProxyPerformanceMetrics performanceMetrics)
     {
         _options = options;
         _metrics = metrics;
+        _performanceMetrics = performanceMetrics;
         _capabilities = options.GetInspectionCapabilities();
         _rewriter = new SqlRewriter(options.RewriteRules);
         _sessionSlots = new SemaphoreSlim(options.MaxConcurrentSessions, options.MaxConcurrentSessions);
@@ -97,7 +99,17 @@ internal sealed class SqlProxyServer
 
         try
         {
-            var session = new ProxySession(sessionId, client, _options, _capabilities, _rewriter, _metrics);
+            var sessionPerformance = _options.EnablePerformanceMetrics
+                ? _performanceMetrics.CreateSessionTracker()
+                : null;
+            var session = new ProxySession(
+                sessionId,
+                client,
+                _options,
+                _capabilities,
+                _rewriter,
+                _metrics,
+                sessionPerformance);
             await session.RunAsync(serverCancellationToken);
         }
         catch (OperationCanceledException) when (serverCancellationToken.IsCancellationRequested)
@@ -128,6 +140,11 @@ internal sealed class SqlProxyServer
         while (await timer.WaitForNextTickAsync(cancellationToken))
         {
             ProxyLog.Info(_metrics.BuildSummary());
+
+            if (_options.EnablePerformanceMetrics)
+            {
+                ProxyLog.Info(_performanceMetrics.BuildSummary());
+            }
         }
     }
 

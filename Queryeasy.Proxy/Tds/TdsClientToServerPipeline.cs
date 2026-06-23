@@ -16,6 +16,7 @@ internal sealed class TdsClientToServerPipeline
     private readonly TdsPacketWriter _writer;
     private readonly SqlRewriter _rewriter;
     private readonly ProxyMetrics _metrics;
+    private readonly IPerformanceRecorder _performance;
 
     public TdsClientToServerPipeline(
         string sessionId,
@@ -24,7 +25,8 @@ internal sealed class TdsClientToServerPipeline
         ProxyOptions options,
         InspectionCapabilities capabilities,
         SqlRewriter rewriter,
-        ProxyMetrics metrics)
+        ProxyMetrics metrics,
+        IPerformanceRecorder performance)
     {
         _sessionId = sessionId;
         _options = options;
@@ -35,6 +37,7 @@ internal sealed class TdsClientToServerPipeline
         _writer = new TdsPacketWriter(targetStream);
         _rewriter = rewriter;
         _metrics = metrics;
+        _performance = performance;
     }
 
     public async Task<long> RunAsync(CancellationToken cancellationToken)
@@ -47,7 +50,10 @@ internal sealed class TdsClientToServerPipeline
 
             try
             {
-                packet = await ReadPacketWithIdleTimeoutAsync(cancellationToken);
+                using (_performance.Measure(ProxyPerformanceStage.C2sReadPacket))
+                {
+                    packet = await ReadPacketWithIdleTimeoutAsync(cancellationToken);
+                }
             }
             catch (RawTlsDetectedException ex)
             {
@@ -66,7 +72,10 @@ internal sealed class TdsClientToServerPipeline
                 }
 
                 _metrics.RawTlsFallback();
-                return totalBytesSent + await ForwardRawTlsStreamAsync(ex.InitialBytes, cancellationToken);
+                using (_performance.Measure(ProxyPerformanceStage.C2sRawTlsForward))
+                {
+                    return totalBytesSent + await ForwardRawTlsStreamAsync(ex.InitialBytes, cancellationToken);
+                }
             }
 
             if (packet is null)
@@ -89,7 +98,10 @@ internal sealed class TdsClientToServerPipeline
                 LogPacket("client -> sql", packetToForward);
             }
 
-            await _writer.WriteAsync(packetsToForward, cancellationToken);
+            using (_performance.Measure(ProxyPerformanceStage.C2sWritePackets))
+            {
+                await _writer.WriteAsync(packetsToForward, cancellationToken);
+            }
             totalBytesSent += packetsToForward.Sum(packetToForward => packetToForward.Length);
         }
 
@@ -206,8 +218,13 @@ internal sealed class TdsClientToServerPipeline
         }
 
         var payload = CombinePayloads(originalPackets);
-        var batch = SqlBatchExtractor.Decode(payload);
-        var sql = batch.Sql;
+        SqlBatchMessage batch;
+        string sql;
+        using (_performance.Measure(ProxyPerformanceStage.C2sSqlBatchDecode))
+        {
+            batch = SqlBatchExtractor.Decode(payload);
+            sql = batch.Sql;
+        }
 
         LogSql("SQL Batch", sql);
 
@@ -223,7 +240,11 @@ internal sealed class TdsClientToServerPipeline
             return originalPackets;
         }
 
-        var rewriteResult = _rewriter.Rewrite(sql);
+        RewriteResult rewriteResult;
+        using (_performance.Measure(ProxyPerformanceStage.C2sSqlBatchRewrite))
+        {
+            rewriteResult = _rewriter.Rewrite(sql);
+        }
 
         if (rewriteResult.Error is not null)
         {
@@ -249,9 +270,16 @@ internal sealed class TdsClientToServerPipeline
             return originalPackets;
         }
 
-        var rewrittenPayload = SqlBatchExtractor.Encode(batch, rewriteResult.Sql);
+        byte[] rewrittenPayload;
+        IReadOnlyList<TdsPacket> rewrittenPackets;
+        using (_performance.Measure(ProxyPerformanceStage.C2sSqlBatchEncodeSplit))
+        {
+            rewrittenPayload = SqlBatchExtractor.Encode(batch, rewriteResult.Sql);
+            rewrittenPackets = SplitRewrittenPayload(firstPacket, originalPackets, rewrittenPayload);
+        }
+
         _metrics.RewriteApplied();
-        return SplitRewrittenPayload(firstPacket, originalPackets, rewrittenPayload);
+        return rewrittenPackets;
     }
 
     private async Task<IReadOnlyList<TdsPacket>> ProcessRpcRequestMessageAsync(
@@ -277,7 +305,11 @@ internal sealed class TdsClientToServerPipeline
 
         var payload = CombinePayloads(originalPackets);
         var requiresFullSpExecuteSqlParse = _capabilities.RewriteRpc || _capabilities.LogSqlText;
-        var inspectionResult = RpcRequestInspector.Inspect(payload, requiresFullSpExecuteSqlParse);
+        RpcInspectionResult inspectionResult;
+        using (_performance.Measure(ProxyPerformanceStage.C2sRpcInspect))
+        {
+            inspectionResult = RpcRequestInspector.Inspect(payload, requiresFullSpExecuteSqlParse);
+        }
 
         ProxyLog.Debug(
             $"[{_sessionId}] RPC Request inspected. Procedure: {FormatEmpty(inspectionResult.ProcedureName)}, sp_executesql: {inspectionResult.ContainsSpExecuteSql}.");
@@ -319,12 +351,16 @@ internal sealed class TdsClientToServerPipeline
             return originalPackets;
         }
 
-        var rewriteResult = _rewriter.Rewrite(
-            inspectionResult.SpExecuteSqlRequest.Statement,
-            QueryRewriteScope.RpcSpExecuteSql,
-            SpExecuteSqlParameterHelper.GetLogicalParameters(
-                inspectionResult.SpExecuteSqlRequest.ParameterDeclaration,
-                inspectionResult.SpExecuteSqlRequest.SqlParameters));
+        RewriteResult rewriteResult;
+        using (_performance.Measure(ProxyPerformanceStage.C2sRpcRewrite))
+        {
+            rewriteResult = _rewriter.Rewrite(
+                inspectionResult.SpExecuteSqlRequest.Statement,
+                QueryRewriteScope.RpcSpExecuteSql,
+                SpExecuteSqlParameterHelper.GetLogicalParameters(
+                    inspectionResult.SpExecuteSqlRequest.ParameterDeclaration,
+                    inspectionResult.SpExecuteSqlRequest.SqlParameters));
+        }
 
         if (rewriteResult.Error is not null)
         {
@@ -362,13 +398,18 @@ internal sealed class TdsClientToServerPipeline
         }
 
         byte[] rewrittenPayload;
+        IReadOnlyList<TdsPacket> rewrittenPackets;
 
         try
         {
-            rewrittenPayload = RpcSpExecuteSqlEncoder.Encode(
-                inspectionResult.SpExecuteSqlRequest,
-                rewriteResult.Sql,
-                rewriteResult.ParameterChanges);
+            using (_performance.Measure(ProxyPerformanceStage.C2sRpcEncodeSplit))
+            {
+                rewrittenPayload = RpcSpExecuteSqlEncoder.Encode(
+                    inspectionResult.SpExecuteSqlRequest,
+                    rewriteResult.Sql,
+                    rewriteResult.ParameterChanges);
+                rewrittenPackets = SplitRewrittenPayload(firstPacket, originalPackets, rewrittenPayload);
+            }
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or OverflowException or FormatException)
         {
@@ -385,7 +426,7 @@ internal sealed class TdsClientToServerPipeline
         }
 
         _metrics.RewriteApplied();
-        return SplitRewrittenPayload(firstPacket, originalPackets, rewrittenPayload);
+        return rewrittenPackets;
     }
 
     private IReadOnlyList<TdsPacket> HandleRewriteFailure(
@@ -428,8 +469,16 @@ internal sealed class TdsClientToServerPipeline
 
         while (!packets[^1].IsEndOfMessage)
         {
-            var nextPacket = await ReadPacketWithIdleTimeoutAsync(cancellationToken)
-                ?? throw new IOException("TDS message ended before EndOfMessage packet.");
+            TdsPacket? nextPacket;
+            using (_performance.Measure(ProxyPerformanceStage.C2sReadMessage))
+            {
+                nextPacket = await ReadPacketWithIdleTimeoutAsync(cancellationToken);
+            }
+
+            if (nextPacket is null)
+            {
+                throw new IOException("TDS message ended before EndOfMessage packet.");
+            }
 
             packets.Add(nextPacket);
             totalPayloadBytes += nextPacket.Payload.Length;

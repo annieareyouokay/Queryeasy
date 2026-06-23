@@ -14,6 +14,8 @@ internal sealed class ProxySession
     private readonly InspectionCapabilities _capabilities;
     private readonly SqlRewriter _rewriter;
     private readonly ProxyMetrics _metrics;
+    private readonly SessionPerformanceTracker? _sessionPerformance;
+    private readonly IPerformanceRecorder _performance;
 
     public ProxySession(
         string sessionId,
@@ -21,7 +23,8 @@ internal sealed class ProxySession
         ProxyOptions options,
         InspectionCapabilities capabilities,
         SqlRewriter rewriter,
-        ProxyMetrics metrics)
+        ProxyMetrics metrics,
+        SessionPerformanceTracker? sessionPerformance)
     {
         _sessionId = sessionId;
         _client = client;
@@ -29,54 +32,86 @@ internal sealed class ProxySession
         _capabilities = capabilities;
         _rewriter = rewriter;
         _metrics = metrics;
+        _sessionPerformance = sessionPerformance;
+        _performance = (IPerformanceRecorder?)sessionPerformance ?? NoOpPerformanceRecorder.Instance;
     }
 
     public async Task RunAsync(CancellationToken serverCancellationToken)
     {
-        using var target = new TcpClient { NoDelay = true };
+        try
+        {
+            using var target = new TcpClient { NoDelay = true };
 
-        await ConnectToTargetAsync(target, serverCancellationToken);
+            await ConnectToTargetAsync(target, serverCancellationToken);
 
-        using var sessionCancellation = CancellationTokenSource.CreateLinkedTokenSource(serverCancellationToken);
+            using var sessionCancellation = CancellationTokenSource.CreateLinkedTokenSource(serverCancellationToken);
 
-        var clientStream = _client.GetStream();
-        var targetStream = target.GetStream();
-        var preLoginNegotiator = new TdsPreLoginNegotiator(
-            _sessionId,
-            clientStream,
-            targetStream,
-            _options);
+            var clientStream = _client.GetStream();
+            var targetStream = target.GetStream();
+            var preLoginNegotiator = new TdsPreLoginNegotiator(
+                _sessionId,
+                clientStream,
+                targetStream,
+                _options,
+                _performance);
 
-        var preLoginResult = await preLoginNegotiator.NegotiateAsync(sessionCancellation.Token);
+            TdsPreLoginNegotiationResult preLoginResult;
+            using (_performance.Measure(ProxyPerformanceStage.SessionPreLogin))
+            {
+                preLoginResult = await preLoginNegotiator.NegotiateAsync(sessionCancellation.Token);
+            }
 
-        var clientToServerPipeline = new TdsClientToServerPipeline(
-            _sessionId,
-            clientStream,
-            targetStream,
-            _options,
-            _capabilities,
-            _rewriter,
-            _metrics);
+            var clientToServerPipeline = new TdsClientToServerPipeline(
+                _sessionId,
+                clientStream,
+                targetStream,
+                _options,
+                _capabilities,
+                _rewriter,
+                _metrics,
+                _performance);
 
-        var clientToServer = clientToServerPipeline.RunAsync(sessionCancellation.Token);
+            var clientToServer = RunClientToServerAsync(clientToServerPipeline, sessionCancellation.Token);
+            var serverToClient = RunServerToClientAsync(
+                targetStream,
+                clientStream,
+                "sql -> client",
+                sessionCancellation.Token);
 
-        var serverToClient = CopyUntilClosedAsync(
-            targetStream,
-            clientStream,
-            "sql -> client",
-            sessionCancellation.Token);
+            await Task.WhenAny(clientToServer, serverToClient);
+            await sessionCancellation.CancelAsync();
 
-        await Task.WhenAny(clientToServer, serverToClient);
-        await sessionCancellation.CancelAsync();
+            var clientToServerBytes = preLoginResult.ClientToServerBytes
+                + await TaskObservation.IgnoreCancellationAsync(clientToServer);
+            var serverToClientBytes = preLoginResult.ServerToClientBytes
+                + await TaskObservation.IgnoreCancellationAsync(serverToClient);
 
-        var clientToServerBytes = preLoginResult.ClientToServerBytes + await TaskObservation.IgnoreCancellationAsync(clientToServer);
-        var serverToClientBytes = preLoginResult.ServerToClientBytes + await TaskObservation.IgnoreCancellationAsync(serverToClient);
+            _metrics.AddClientToSqlBytes(clientToServerBytes);
+            _metrics.AddSqlToClientBytes(serverToClientBytes);
 
-        _metrics.AddClientToSqlBytes(clientToServerBytes);
-        _metrics.AddSqlToClientBytes(serverToClientBytes);
+            ProxyLog.Info(
+                $"[{_sessionId}] Session closed. Sent {clientToServerBytes} bytes to SQL Server, received {serverToClientBytes} bytes.");
+        }
+        finally
+        {
+            CompleteSessionPerformance();
+        }
+    }
 
-        ProxyLog.Info(
-            $"[{_sessionId}] Session closed. Sent {clientToServerBytes} bytes to SQL Server, received {serverToClientBytes} bytes.");
+    private void CompleteSessionPerformance()
+    {
+        if (_sessionPerformance is null)
+        {
+            return;
+        }
+
+        var summary = _sessionPerformance.BuildSessionSummary();
+        _sessionPerformance.Complete();
+
+        if (_options.LogLevel >= ProxyLogLevel.Debug && !string.IsNullOrEmpty(summary))
+        {
+            ProxyLog.Debug($"[{_sessionId}] {summary}");
+        }
     }
 
     private async Task ConnectToTargetAsync(TcpClient target, CancellationToken serverCancellationToken)
@@ -86,9 +121,43 @@ internal sealed class ProxySession
 
         ProxyLog.Info($"[{_sessionId}] Connecting to SQL Server {_options.TargetHost}:{_options.TargetPort}.");
 
-        await target.ConnectAsync(_options.TargetHost, _options.TargetPort, connectCancellation.Token);
+        using (_performance.Measure(ProxyPerformanceStage.SessionConnect))
+        {
+            await target.ConnectAsync(_options.TargetHost, _options.TargetPort, connectCancellation.Token);
+        }
 
         ProxyLog.Info($"[{_sessionId}] Connected to SQL Server.");
+    }
+
+    private async Task<long> RunClientToServerAsync(
+        TdsClientToServerPipeline pipeline,
+        CancellationToken cancellationToken)
+    {
+        using (_performance.Measure(ProxyPerformanceStage.SessionClientToServer))
+        {
+            return await pipeline.RunAsync(cancellationToken);
+        }
+    }
+
+    private Task<long> RunServerToClientAsync(
+        NetworkStream source,
+        NetworkStream destination,
+        string direction,
+        CancellationToken cancellationToken)
+    {
+        return MeasureServerToClientAsync(source, destination, direction, cancellationToken);
+    }
+
+    private async Task<long> MeasureServerToClientAsync(
+        NetworkStream source,
+        NetworkStream destination,
+        string direction,
+        CancellationToken cancellationToken)
+    {
+        using (_performance.Measure(ProxyPerformanceStage.SessionServerToClient))
+        {
+            return await CopyUntilClosedAsync(source, destination, direction, cancellationToken);
+        }
     }
 
     private async Task<long> CopyUntilClosedAsync(
@@ -104,7 +173,11 @@ internal sealed class ProxySession
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                var bytesRead = await ReadWithIdleTimeoutAsync(source, buffer, cancellationToken);
+                int bytesRead;
+                using (_performance.Measure(ProxyPerformanceStage.S2cRead))
+                {
+                    bytesRead = await ReadWithIdleTimeoutAsync(source, buffer, cancellationToken);
+                }
 
                 if (bytesRead == 0)
                 {
@@ -112,8 +185,11 @@ internal sealed class ProxySession
                     break;
                 }
 
-                await destination.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
-                await destination.FlushAsync(cancellationToken);
+                using (_performance.Measure(ProxyPerformanceStage.S2cWrite))
+                {
+                    await destination.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
+                    await destination.FlushAsync(cancellationToken);
+                }
 
                 totalBytes += bytesRead;
             }

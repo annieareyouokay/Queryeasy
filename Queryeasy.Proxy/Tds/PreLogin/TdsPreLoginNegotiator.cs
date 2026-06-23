@@ -6,6 +6,7 @@ internal sealed class TdsPreLoginNegotiator
 {
     private readonly string _sessionId;
     private readonly ProxyOptions _options;
+    private readonly IPerformanceRecorder _performance;
     private readonly TdsPacketReader _clientReader;
     private readonly TdsPacketReader _targetReader;
     private readonly TdsPacketWriter _clientWriter;
@@ -15,10 +16,12 @@ internal sealed class TdsPreLoginNegotiator
         string sessionId,
         NetworkStream clientStream,
         NetworkStream targetStream,
-        ProxyOptions options)
+        ProxyOptions options,
+        IPerformanceRecorder performance)
     {
         _sessionId = sessionId;
         _options = options;
+        _performance = performance;
         _clientReader = new TdsPacketReader(clientStream);
         _targetReader = new TdsPacketReader(targetStream);
         _clientWriter = new TdsPacketWriter(clientStream);
@@ -32,7 +35,11 @@ internal sealed class TdsPreLoginNegotiator
             return TdsPreLoginNegotiationResult.NotHandled;
         }
 
-        var clientPacket = await _clientReader.ReadAsync(cancellationToken);
+        TdsPacket? clientPacket;
+        using (_performance.Measure(ProxyPerformanceStage.PreLoginClientRead))
+        {
+            clientPacket = await _clientReader.ReadAsync(cancellationToken);
+        }
 
         if (clientPacket is null)
         {
@@ -41,14 +48,26 @@ internal sealed class TdsPreLoginNegotiator
 
         if (clientPacket.KnownType != TdsPacketType.PreLogin)
         {
-            await _targetWriter.WriteAsync(clientPacket, cancellationToken);
+            using (_performance.Measure(ProxyPerformanceStage.PreLoginWrite))
+            {
+                await _targetWriter.WriteAsync(clientPacket, cancellationToken);
+            }
+
             return new TdsPreLoginNegotiationResult(clientPacket.Length, 0, true);
         }
 
         var clientPacketToForward = ProcessPreLoginPacket("client", clientPacket);
-        await _targetWriter.WriteAsync(clientPacketToForward, cancellationToken);
 
-        var targetPacket = await _targetReader.ReadAsync(cancellationToken);
+        using (_performance.Measure(ProxyPerformanceStage.PreLoginWrite))
+        {
+            await _targetWriter.WriteAsync(clientPacketToForward, cancellationToken);
+        }
+
+        TdsPacket? targetPacket;
+        using (_performance.Measure(ProxyPerformanceStage.PreLoginTargetRead))
+        {
+            targetPacket = await _targetReader.ReadAsync(cancellationToken);
+        }
 
         if (targetPacket is null)
         {
@@ -56,7 +75,11 @@ internal sealed class TdsPreLoginNegotiator
         }
 
         var targetPacketToForward = ProcessPreLoginPacket("server", targetPacket);
-        await _clientWriter.WriteAsync(targetPacketToForward, cancellationToken);
+
+        using (_performance.Measure(ProxyPerformanceStage.PreLoginWrite))
+        {
+            await _clientWriter.WriteAsync(targetPacketToForward, cancellationToken);
+        }
 
         return new TdsPreLoginNegotiationResult(
             clientPacketToForward.Length,

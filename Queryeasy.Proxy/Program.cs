@@ -5,6 +5,7 @@ var options = ProxyOptions.Load(configPath);
 options.Validate();
 ProxyLog.Configure(options.LogLevel, options.AsyncLogging);
 var metrics = new ProxyMetrics();
+var performanceMetrics = new ProxyPerformanceMetrics();
 
 using var shutdown = new CancellationTokenSource();
 
@@ -14,7 +15,7 @@ Console.CancelKeyPress += (_, eventArgs) =>
     shutdown.Cancel();
 };
 
-var server = new SqlProxyServer(options, metrics);
+var server = new SqlProxyServer(options, metrics, performanceMetrics);
 
 try
 {

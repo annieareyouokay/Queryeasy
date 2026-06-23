@@ -58,6 +58,8 @@ internal sealed record ProxyOptions
 
     public bool AsyncLogging { get; init; } = true;
 
+    public bool EnablePerformanceMetrics { get; init; }
+
     public List<SqlRewriteRule> RewriteRules { get; init; } = [];
 
     public TimeSpan ConnectTimeout => TimeSpan.FromSeconds(ConnectTimeoutSeconds);
