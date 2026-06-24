@@ -1,4 +1,6 @@
 using System.Buffers;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net.Sockets;
 using Queryeasy.Proxy.Rewrite;
 using Queryeasy.Proxy.Tds;
@@ -61,6 +63,8 @@ internal sealed class ProxySession
                 preLoginResult = await preLoginNegotiator.NegotiateAsync(sessionCancellation.Token);
             }
 
+            var pendingS2cTraces = _sessionPerformance?.PendingS2cTraces;
+
             var clientToServerPipeline = new TdsClientToServerPipeline(
                 _sessionId,
                 clientStream,
@@ -76,7 +80,8 @@ internal sealed class ProxySession
                 targetStream,
                 clientStream,
                 "sql -> client",
-                sessionCancellation.Token);
+                sessionCancellation.Token,
+                pendingS2cTraces);
 
             await Task.WhenAny(clientToServer, serverToClient);
             await sessionCancellation.CancelAsync();
@@ -143,20 +148,22 @@ internal sealed class ProxySession
         NetworkStream source,
         NetworkStream destination,
         string direction,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ConcurrentQueue<RequestTrace>? pendingS2cTraces)
     {
-        return MeasureServerToClientAsync(source, destination, direction, cancellationToken);
+        return MeasureServerToClientAsync(source, destination, direction, cancellationToken, pendingS2cTraces);
     }
 
     private async Task<long> MeasureServerToClientAsync(
         NetworkStream source,
         NetworkStream destination,
         string direction,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ConcurrentQueue<RequestTrace>? pendingS2cTraces)
     {
         using (_performance.Measure(ProxyPerformanceStage.SessionServerToClient))
         {
-            return await CopyUntilClosedAsync(source, destination, direction, cancellationToken);
+            return await CopyUntilClosedAsync(source, destination, direction, cancellationToken, pendingS2cTraces);
         }
     }
 
@@ -164,15 +171,24 @@ internal sealed class ProxySession
         NetworkStream source,
         NetworkStream destination,
         string direction,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ConcurrentQueue<RequestTrace>? pendingS2cTraces)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(_options.BufferSizeBytes);
         var totalBytes = 0L;
+        RequestTrace? currentS2cTrace = null;
 
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
+                // Before reading, try to dequeue a pending c2s trace to correlate with s2c
+                if (currentS2cTrace is null && pendingS2cTraces?.TryDequeue(out var trace) == true)
+                {
+                    currentS2cTrace = trace;
+                    currentS2cTrace.S2cReadStartTimestamp = Stopwatch.GetTimestamp();
+                }
+
                 int bytesRead;
                 using (_performance.Measure(ProxyPerformanceStage.S2cRead))
                 {
@@ -189,6 +205,25 @@ internal sealed class ProxySession
                 {
                     await destination.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
                     await destination.FlushAsync(cancellationToken);
+                }
+
+                // After write, complete the s2c trace if we have one
+                if (currentS2cTrace is not null)
+                {
+                    var writeTimestamp = Stopwatch.GetTimestamp();
+                    var readStart = currentS2cTrace.S2cReadStartTimestamp;
+                    if (_sessionPerformance is not null)
+                    {
+                        _sessionPerformance.CompleteS2cTrace(currentS2cTrace, readStart, writeTimestamp);
+
+                        // Log per-request waterfall at Trace level
+                        if (_options.LogLevel >= ProxyLogLevel.Trace)
+                        {
+                            ProxyLog.Trace($"[{_sessionId}] {currentS2cTrace.BuildWaterfall()}");
+                        }
+                    }
+
+                    currentS2cTrace = null;
                 }
 
                 totalBytes += bytesRead;

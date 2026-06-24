@@ -478,14 +478,13 @@ public class UnitTest1
     {
         var metrics = new ProxyPerformanceMetrics();
 
-        metrics.Record(ProxyPerformanceStage.C2sReadPacket, Stopwatch.Frequency / 10);
-        metrics.Record(ProxyPerformanceStage.C2sReadPacket, Stopwatch.Frequency / 5);
+        metrics.Record(ProxyPerformanceStage.C2sWritePackets, Stopwatch.Frequency / 10);
+        metrics.Record(ProxyPerformanceStage.C2sWritePackets, Stopwatch.Frequency / 5);
 
-        var summary = metrics.BuildSummary();
+        var summary = metrics.BuildHumanSummary();
 
-        Assert.Contains("C2sReadPacket=2/", summary);
-        Assert.Contains("/avg", summary);
-        Assert.Contains("/max", summary);
+        Assert.Contains("C2sWritePackets", summary);
+        Assert.Contains("n=2", summary);
     }
 
     [Fact]
@@ -494,12 +493,13 @@ public class UnitTest1
         var metrics = new ProxyPerformanceMetrics();
         var session = metrics.CreateSessionTracker();
 
-        session.Record(ProxyPerformanceStage.SessionConnect, Stopwatch.Frequency / 20);
+        session.Record(ProxyPerformanceStage.SessionConnect, Stopwatch.Frequency / 20, Stopwatch.GetTimestamp());
         session.Complete();
 
-        var summary = metrics.BuildSummary();
+        var summary = metrics.BuildHumanSummary();
 
-        Assert.Contains("SessionConnect=1/", summary);
+        Assert.Contains("SessionConnect", summary);
+        Assert.Contains("n=1", summary);
     }
 
     [Fact]
@@ -511,7 +511,7 @@ public class UnitTest1
         {
         }
 
-        recorder.Record(ProxyPerformanceStage.C2sWritePackets, Stopwatch.Frequency);
+        recorder.Record(ProxyPerformanceStage.C2sWritePackets, Stopwatch.Frequency, Stopwatch.GetTimestamp());
     }
 
     private sealed class FlushCountingStream : MemoryStream

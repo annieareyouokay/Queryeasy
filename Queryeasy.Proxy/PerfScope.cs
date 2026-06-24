@@ -23,6 +23,6 @@ internal readonly struct PerfScope : IDisposable
         }
 
         var elapsedTicks = Stopwatch.GetTimestamp() - _startTimestamp;
-        _recorder.Record(_stage, elapsedTicks);
+        _recorder.Record(_stage, elapsedTicks, _startTimestamp);
     }
 }

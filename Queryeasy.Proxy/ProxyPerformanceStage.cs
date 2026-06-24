@@ -9,7 +9,6 @@ internal enum ProxyPerformanceStage
     PreLoginClientRead,
     PreLoginTargetRead,
     PreLoginWrite,
-    C2sReadPacket,
     C2sReadMessage,
     C2sWritePackets,
     C2sSqlBatchDecode,

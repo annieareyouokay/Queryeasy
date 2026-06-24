@@ -95,6 +95,8 @@ JSON-поля десериализуются без учёта регистра.
 | `MetricsSummaryIntervalSeconds` | `30` | Интервал summary-лога метрик. `0` отключает. |
 | `AsyncLogging` | `true` | Логи через фоновый channel вместо синхронного вывода. |
 | `EnablePerformanceMetrics` | `false` | Wall-clock замеры по этапам пайплайна. См. [logging-and-metrics.md](logging-and-metrics.md). |
+| `PerformanceTraceBufferCapacity` | `1000` | Размер буфера per-request трасс на сессию. `0` отключает per-request waterfall. |
+| `PerformanceJsonLogPath` | `null` | Путь к файлу для записи JSON-статистики производительности. Пример: `"C:\\logs\\perf.json"`. `null` отключает запись в файл. |
 
 Проверяется ([ProxyOptions.Validate](../Queryeasy.Proxy/ProxyOptions.cs)):
 

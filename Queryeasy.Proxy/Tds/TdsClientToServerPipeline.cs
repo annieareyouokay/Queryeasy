@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Queryeasy.Proxy.Rewrite;
 using Queryeasy.Proxy.Tds.PreLogin;
 using System.Buffers;
@@ -17,6 +18,7 @@ internal sealed class TdsClientToServerPipeline
     private readonly SqlRewriter _rewriter;
     private readonly ProxyMetrics _metrics;
     private readonly IPerformanceRecorder _performance;
+    private bool _hasPendingRequest;
 
     public TdsClientToServerPipeline(
         string sessionId,
@@ -50,10 +52,7 @@ internal sealed class TdsClientToServerPipeline
 
             try
             {
-                using (_performance.Measure(ProxyPerformanceStage.C2sReadPacket))
-                {
-                    packet = await ReadPacketWithIdleTimeoutAsync(cancellationToken);
-                }
+                packet = await ReadPacketWithIdleTimeoutAsync(cancellationToken);
             }
             catch (RawTlsDetectedException ex)
             {
@@ -102,6 +101,13 @@ internal sealed class TdsClientToServerPipeline
             {
                 await _writer.WriteAsync(packetsToForward, cancellationToken);
             }
+
+            if (_hasPendingRequest)
+            {
+                _performance.EndRequest(Stopwatch.GetTimestamp());
+                _hasPendingRequest = false;
+            }
+
             totalBytesSent += packetsToForward.Sum(packetToForward => packetToForward.Length);
         }
 
@@ -174,10 +180,14 @@ internal sealed class TdsClientToServerPipeline
         if (firstPacket.KnownType == TdsPacketType.SqlBatch)
         {
             _metrics.SqlBatchInspected();
+            _performance.BeginRequest(RequestType.SqlBatch, null);
+            _hasPendingRequest = true;
         }
         else if (firstPacket.KnownType == TdsPacketType.RpcRequest)
         {
             _metrics.RpcInspected();
+            _performance.BeginRequest(RequestType.RpcRequest, null);
+            _hasPendingRequest = true;
         }
 
         return await ForwardMessagePacketsAsync(firstPacket, cancellationToken);
@@ -227,6 +237,10 @@ internal sealed class TdsClientToServerPipeline
         }
 
         LogSql("SQL Batch", sql);
+
+        var sqlPreview = sql.Length > 200 ? sql[..200] : sql;
+        _performance.BeginRequest(RequestType.SqlBatch, sqlPreview);
+        _hasPendingRequest = true;
 
         if (IsSqlTooLargeForRewrite(sql))
         {
@@ -318,6 +332,15 @@ internal sealed class TdsClientToServerPipeline
         {
             _metrics.ParseWarning();
             ProxyLog.Warn($"[{_sessionId}] RPC parse warning: {inspectionResult.ParseWarning}");
+        }
+
+        if (inspectionResult.ContainsSpExecuteSql && inspectionResult.Statement is not null)
+        {
+            var rpcSqlPreview = inspectionResult.Statement.Length > 200
+                ? inspectionResult.Statement[..200]
+                : inspectionResult.Statement;
+            _performance.BeginRequest(RequestType.RpcRequest, rpcSqlPreview);
+            _hasPendingRequest = true;
         }
 
         if (_options.LogSqlText && inspectionResult.ContainsSpExecuteSql)

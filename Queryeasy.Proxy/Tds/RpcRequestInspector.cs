@@ -37,12 +37,25 @@ internal static class RpcRequestInspector
         var procedure = ReadProcedure(payload, ref offset);
         var isSpExecuteSql = IsSpExecuteSqlProcedure(procedure);
 
-        if (!requiresFullSpExecuteSqlParse || !isSpExecuteSql)
+        if (!isSpExecuteSql)
         {
             return new RpcInspectionResult(
-                isSpExecuteSql,
+                false,
                 procedure.DisplayName,
                 null,
+                null,
+                [],
+                null,
+                null);
+        }
+
+        if (!requiresFullSpExecuteSqlParse)
+        {
+            var minimalStatement = ReadMinimalStatement(payload, ref offset);
+            return new RpcInspectionResult(
+                true,
+                procedure.DisplayName,
+                minimalStatement,
                 null,
                 [],
                 null,
@@ -82,6 +95,33 @@ internal static class RpcRequestInspector
             parameters,
             request,
             parseWarning);
+    }
+
+    private static string? ReadMinimalStatement(byte[] payload, ref int offset)
+    {
+        if (offset + 2 > payload.Length)
+        {
+            return null;
+        }
+
+        // Skip option flags (2 bytes)
+        offset += 2;
+
+        if (offset >= payload.Length)
+        {
+            return null;
+        }
+
+        try
+        {
+            // Read just the first parameter (@stmt) to get the SQL text
+            var firstParameter = ReadParameter(payload, ref offset);
+            return firstParameter.Value;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static bool IsSpExecuteSqlProcedure(RpcProcedure procedure)

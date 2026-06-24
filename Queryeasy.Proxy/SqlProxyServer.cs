@@ -100,7 +100,7 @@ internal sealed class SqlProxyServer
         try
         {
             var sessionPerformance = _options.EnablePerformanceMetrics
-                ? _performanceMetrics.CreateSessionTracker()
+                ? _performanceMetrics.CreateSessionTracker(_options.PerformanceTraceBufferCapacity)
                 : null;
             var session = new ProxySession(
                 sessionId,
@@ -143,8 +143,40 @@ internal sealed class SqlProxyServer
 
             if (_options.EnablePerformanceMetrics)
             {
-                ProxyLog.Info(_performanceMetrics.BuildSummary());
+                ProxyLog.Info(_performanceMetrics.BuildHumanSummary());
+
+                var json = _performanceMetrics.BuildJsonSummary();
+
+                if (_options.LogLevel >= ProxyLogLevel.Debug)
+                {
+                    ProxyLog.Debug(json);
+                }
+
+                if (!string.IsNullOrEmpty(_options.PerformanceJsonLogPath))
+                {
+                    await AppendJsonToFileAsync(json, _options.PerformanceJsonLogPath, cancellationToken);
+                }
+
+                _performanceMetrics.ResetAll();
             }
+        }
+    }
+
+    private static async Task AppendJsonToFileAsync(string json, string path, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            {
+                Directory.CreateDirectory(dir);
+            }
+
+            await File.AppendAllTextAsync(path, json + Environment.NewLine, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            ProxyLog.Warn($"Failed to write performance JSON to '{path}': {ex.Message}");
         }
     }
 

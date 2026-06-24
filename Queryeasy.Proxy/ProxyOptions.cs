@@ -60,6 +60,10 @@ internal sealed record ProxyOptions
 
     public bool EnablePerformanceMetrics { get; init; }
 
+    public int PerformanceTraceBufferCapacity { get; init; } = 1000;
+
+    public string? PerformanceJsonLogPath { get; init; }
+
     public List<SqlRewriteRule> RewriteRules { get; init; } = [];
 
     public TimeSpan ConnectTimeout => TimeSpan.FromSeconds(ConnectTimeoutSeconds);
