@@ -4,6 +4,10 @@
 artifacts/
 .build-verify/
 
+# Publish output
+publish/
+.publish-*/
+
 # User-specific files
 *.user
 *.userosscache
